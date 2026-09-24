@@ -1,0 +1,4 @@
+scrapling[fetchers]>=0.4.15
+gspread>=6.2.1
+google-auth>=2.58.0
+python-dotenv>=1.2.0

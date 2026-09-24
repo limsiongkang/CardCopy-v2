@@ -1,0 +1,15 @@
+.env
+service-account.json
+# Ignore credential JSON by default, but keep the config files that are
+# meant to be shared. selectors.json holds no secrets - it is CSS rules.
+*.json
+!selectors.json
+!package.json
+logs/
+state/
+__pycache__/
+*.pyc
+data/
+
+# Real people's names and work emails - not for a public repo.
+leads/*.csv

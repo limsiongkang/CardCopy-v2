@@ -1,0 +1,27 @@
+# Competitor product URLs - one per line.
+#
+# Two formats are accepted:
+#   https://www.example.com/products/blue-widget
+#   Example Co | https://www.example.com/products/blue-widget
+#
+# The second form lets you set the competitor name yourself. Without it,
+# the name is taken from the website address (example.com -> Example).
+#
+# Lines starting with # are ignored, so you can park a URL here without
+# deleting it. Blank lines are ignored too.
+#
+# --- Paste your URLs below this line ---
+https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
+https://books.toscrape.com/catalogue/tipping-the-velvet_999/index.html
+https://books.toscrape.com/catalogue/rip-it-up-and-start-again_986/index.html
+https://www.scrapingcourse.com/ecommerce/
+https://www.scrapingcourse.com/pagination
+https://www.scrapingcourse.com/button-click
+https://www.scrapingcourse.com/infinite-scrolling
+https://www.scrapingcourse.com/login
+https://www.scrapingcourse.com/login/csrf
+https://www.scrapingcourse.com/login/cf-antibot
+https://www.scrapingcourse.com/login/cf-turnstile
+https://www.scrapingcourse.com/javascript-rendering
+https://www.scrapingcourse.com/table-parsing
+https://www.scrapingcourse.com/antibot-challenge

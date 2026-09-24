@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "Per-site rules, for shops that do not publish standard product data.",
+    "",
+    "MOST SITES NEED NO ENTRY HERE. The monitor first tries the machine-readable",
+    "product data that shops publish for Google Shopping, which works on sites",
+    "nobody has configured. Only add a site here if its row comes back blank or",
+    "wrong after a real run.",
+    "",
+    "The key is the domain without 'www.'. Values are CSS selectors - the same",
+    "thing you get from right-clicking an element in a browser and choosing",
+    "Inspect. Any of the four keys may be left out.",
+    "",
+    "Scrapling's adaptive mode is applied to these, so once a selector has",
+    "matched successfully it keeps working even after the shop moves the",
+    "element in a redesign.",
+    "",
+    "'price' is the NORMAL price. 'sale_price' is the DISCOUNTED one, and is",
+    "only needed on shops that show both. If the sale figure is not actually",
+    "lower than the normal one it is ignored, so getting the two the wrong way",
+    "round cannot corrupt a row.",
+    "",
+    "Example of a full entry:",
+    "  \"example-shop.com\": {",
+    "    \"name\": \"h1.product-title\",",
+    "    \"price\": \".price-was\",",
+    "    \"sale_price\": \".price-now\",",
+    "    \"in_stock\": \".stock-status\"",
+    "  }"
+  ],
+
+  "books.toscrape.com": {
+    "name": "h1",
+    "price": ".price_color",
+    "in_stock": ".availability"
+  }
+}
