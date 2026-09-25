@@ -11,17 +11,26 @@
 # deleting it. Blank lines are ignored too.
 #
 # --- Paste your URLs below this line ---
-https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
-https://books.toscrape.com/catalogue/tipping-the-velvet_999/index.html
-https://books.toscrape.com/catalogue/rip-it-up-and-start-again_986/index.html
-https://www.scrapingcourse.com/ecommerce/
-https://www.scrapingcourse.com/pagination
-https://www.scrapingcourse.com/button-click
-https://www.scrapingcourse.com/infinite-scrolling
-https://www.scrapingcourse.com/login
-https://www.scrapingcourse.com/login/csrf
-https://www.scrapingcourse.com/login/cf-antibot
-https://www.scrapingcourse.com/login/cf-turnstile
-https://www.scrapingcourse.com/javascript-rendering
-https://www.scrapingcourse.com/table-parsing
-https://www.scrapingcourse.com/antibot-challenge
+
+
+# ----------------------------------------------------------------------
+# CATEGORY PAGES
+#
+# A line can be a single product page OR a whole category / shop page.
+# You do not have to say which - it is worked out from the page itself.
+#
+# A category page produces one row PER PRODUCT on it, and each row keeps
+# that product's own link. One URL can replace a long list, and products
+# the competitor adds to that category start appearing on their own.
+#
+# If a category page is misread as a single product, force it:
+#     list:https://example-shop.com/collections/all
+#
+# Only the FIRST page of a category is read. For a paginated shop, list
+# each page, or use a "show all" URL if the shop has one.
+#
+# Example - remove the # to track all 16 products on it:
+# list:https://www.scrapingcourse.com/ecommerce/
+# ----------------------------------------------------------------------
+
+list:https://www.scrapingcourse.com/ecommerce/

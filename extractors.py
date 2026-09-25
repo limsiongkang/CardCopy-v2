@@ -506,3 +506,226 @@ def find_was_price(page, current_price: float | None) -> float | None:
         if best:
             return best
     return None
+
+
+# ----------------------------------------------------------------------
+# Listing pages (a category or shop page holding many products)
+# ----------------------------------------------------------------------
+#
+# Everything above reads ONE product from ONE page. A category page holds
+# many, so this returns a list of fact dicts instead of a single one.
+#
+# Each product keeps the link to its own product page. That link, not the
+# category address, becomes the row's url - which matters because the
+# snapshot, the alerts and the sheet history are all keyed on url. Without
+# it, sixteen products from one category would collide on a single key and
+# a price drop could not be attributed to the right product.
+
+# Tried in order; the first that finds at least _MIN_LISTING_ITEMS wins.
+# The microdata selector leads because it is a published standard rather
+# than one shop platform's habit, so it travels furthest between sites.
+_LISTING_CONTAINERS = (
+    "[itemtype*='schema.org/Product']",
+    "li.product",
+    ".products .product",
+    "[class*='product-card']",
+    "[class*='product-item']",
+    "[class*='product-tile']",
+    "[data-product-id]",
+    "article[class*='product']",
+)
+
+_LISTING_NAME = (
+    "[itemprop='name']",
+    ".woocommerce-loop-product__title",
+    "[class*='product-title']",
+    "[class*='product-name']",
+    "[class*='card__heading']",
+    "h2 a", "h3 a", "h2", "h3",
+)
+
+_LISTING_PRICE = (
+    "[itemprop='price']",
+    "[class*='price']",
+    ".money",
+)
+
+# Two is the threshold: a single product page can carry one
+# schema.org/Product block of its own, and treating that as a listing would
+# turn an ordinary product page into a one-row listing by accident.
+_MIN_LISTING_ITEMS = 2
+
+
+def _all_text(element) -> str | None:
+    """
+    Full visible text of an element, including its children.
+
+    This must not be element.text, which returns only the element's own
+    direct text node. A price marked up as
+    <span class="price"><span>$</span>19.99</span> has an empty direct text
+    node, so .text would return nothing. Shops nest markup like that
+    constantly, so reading children is the normal case.
+    """
+    for accessor in ("get_all_text", "text_content"):
+        method = getattr(element, accessor, None)
+        if callable(method):
+            try:
+                value = method()
+            except Exception:
+                continue
+            if value and str(value).strip():
+                return str(value).strip()
+    value = getattr(element, "text", None)
+    if value and str(value).strip():
+        return str(value).strip()
+    return None
+
+
+def _tile_text(element, selectors) -> str | None:
+    for selector in selectors:
+        found = _first(element, selector)
+        if found is not None:
+            text = _all_text(found)
+            if text:
+                return text
+    return None
+
+
+def _tile_link(element, base_url: str) -> str | None:
+    """The product's own page address, made absolute."""
+    from urllib.parse import urljoin
+
+    try:
+        hrefs = element.css("a::attr(href)")
+    except Exception:
+        return None
+    for href in hrefs:
+        href = str(href).strip()
+        if href and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            return urljoin(base_url, href)
+    return None
+
+
+def _tile_stock(element) -> bool | None:
+    """
+    Stock status for one tile.
+
+    Shop platforms usually stamp this on the container's class list
+    ("... product outofstock ..."), which is steadier than hunting for a
+    badge whose wording changes with every theme.
+    """
+    try:
+        classes = (element.attrib.get("class") or "").lower()
+    except Exception:
+        classes = ""
+    if any(token in classes for token in ("outofstock", "out-of-stock", "sold-out", "soldout")):
+        return False
+    if any(token in classes for token in ("instock", "in-stock")):
+        return True
+
+    for selector in ("[itemprop='availability']", "[class*='stock']", "[class*='availability']"):
+        found = _first(element, selector)
+        if found is None:
+            continue
+        for attribute in ("href", "content"):
+            try:
+                value = found.attrib.get(attribute)
+            except Exception:
+                value = None
+            if value:
+                parsed = stock_from_schema(value)
+                if parsed is not None:
+                    return parsed
+        parsed = stock_from_text(_all_text(found))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _tile_prices(element) -> tuple[float | None, float | None]:
+    """
+    Return (regular_price, sale_price) for one tile.
+
+    Shops mark a reduction with <del> for the old figure and <ins> for the
+    new one. When both are present the <del> value is the regular price and
+    the <ins> value is what a shopper actually pays.
+    """
+    old = parse_price(_tile_text(element, ("del .amount", "del .price", "del", "s", "strike")))
+    new = parse_price(_tile_text(element, ("ins .amount", "ins .price", "ins")))
+    if old is not None and new is not None and new < old:
+        return old, new
+
+    plain = parse_price(_tile_text(element, _LISTING_PRICE))
+    return plain, None
+
+
+def extract_listing(page, url: str, rules: dict | None = None) -> list[dict]:
+    """
+    Pull every product tile from a category or shop page.
+
+    Returns a list of fact dicts in the same shape the single-page
+    strategies produce, each with an extra "product_url". An empty list
+    means this did not look like a listing page.
+    """
+    listing_rules = (rules or {}).get("listing") or {}
+
+    candidates: list[str] = []
+    if listing_rules.get("item"):
+        candidates.append(listing_rules["item"])
+    candidates.extend(_LISTING_CONTAINERS)
+
+    tiles = []
+    for selector in candidates:
+        try:
+            found = page.css(selector)
+        except Exception:
+            continue
+        if found and len(found) >= _MIN_LISTING_ITEMS:
+            tiles = found
+            break
+
+    if not tiles:
+        return []
+
+    name_selectors = tuple(
+        ([listing_rules["name"]] if listing_rules.get("name") else []) + list(_LISTING_NAME)
+    )
+    price_selectors = tuple(
+        ([listing_rules["price"]] if listing_rules.get("price") else []) + list(_LISTING_PRICE)
+    )
+
+    products: list[dict] = []
+    seen: set[str] = set()
+
+    for tile in tiles:
+        name = _tile_text(tile, name_selectors)
+        if not name:
+            continue
+
+        if listing_rules.get("price"):
+            regular = parse_price(_tile_text(tile, price_selectors))
+            sale = None
+            if regular is None:
+                regular, sale = _tile_prices(tile)
+        else:
+            regular, sale = _tile_prices(tile)
+
+        link = _tile_link(tile, url)
+
+        # One tile often contains two links to the same product (the image
+        # and the title), and some themes repeat a "featured" product above
+        # the grid. Keep the first of each.
+        key = link or name
+        if key in seen:
+            continue
+        seen.add(key)
+
+        products.append({
+            "name": name,
+            "price": regular,
+            "sale_price": sale,
+            "in_stock": _tile_stock(tile),
+            "product_url": link,
+        })
+
+    return products

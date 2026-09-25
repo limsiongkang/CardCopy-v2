@@ -23,7 +23,13 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Find a usable Python. The first entry is the one this was set up with.
+#
+# The virtual environment comes first: it is the only one with Scrapling,
+# gspread and the fetcher's browsers actually installed. A bare system
+# Python will fail on the first import, so preferring it would only produce
+# a confusing crash.
 $candidates = @(
+    "$env:USERPROFILE\.venvs\cardcopy\Scripts\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
     "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
 )

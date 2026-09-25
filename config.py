@@ -126,6 +126,21 @@ SOLVE_CLOUDFLARE = _flag("SOLVE_CLOUDFLARE", False)
 # Drop images, fonts and stylesheets. Large saving on proxy bandwidth.
 DISABLE_RESOURCES = _flag("DISABLE_RESOURCES", True)
 
+# --- speed ---------------------------------------------------------------
+# Try a plain HTTP request (impersonating Chrome) before starting a browser.
+# Most shops put their product data straight into the HTML, so this takes
+# well under a second where the browser takes ten or more. A page is only
+# accepted from this path when it holds real product data; anything else -
+# a bot check, a page built by JavaScript - goes to the stealth browser as
+# before. Set to false to use the browser for every page.
+FAST_MODE = _flag("FAST_MODE", True)
+HTTP_TIMEOUT_SECONDS = _number("HTTP_TIMEOUT_SECONDS", 20)
+# Waiting for "network idle" means waiting until the page makes no requests
+# for half a second. Shops running analytics, chat widgets or ad pixels may
+# never get there, so the browser sits out the whole timeout on every page.
+# Off by default; turn on only for a site whose prices arrive late.
+NETWORK_IDLE = _flag("NETWORK_IDLE", False)
+
 # --- what counts as an alert -------------------------------------------
 # Price drops and stock-outs always alert - that was the original brief.
 # Back-in-stock is useful but noisier, so it is opt-in.
@@ -217,7 +232,8 @@ def redacted_summary() -> str:
         f"  Alerts to     : {ALERT_EMAIL_TO or '(not set)'}",
         f"  Proxy         : {proxy_line}",
         f"  Sheet         : {SHEET_TITLE or '(not set)'}",
-        f"  Delay         : {REQUEST_DELAY_SECONDS}s between products",
+        f"  Delay         : {REQUEST_DELAY_SECONDS}s between pages on the same site",
+        f"  Fetching      : {'fast request first, browser if needed' if FAST_MODE else 'browser for every page'}",
         f"  Page timeout  : {PAGE_TIMEOUT_MS / 1000:.0f}s",
     ])
 

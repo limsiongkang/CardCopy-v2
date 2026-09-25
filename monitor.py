@@ -242,7 +242,7 @@ def run(args) -> int:
 
         # --- what to check ----------------------------------------------
         if args.url:
-            targets = [(scraper.competitor_name_from_url(args.url), args.url)]
+            targets = [(scraper.competitor_name_from_url(args.url), args.url, False)]
         else:
             targets = scraper.read_targets()
 

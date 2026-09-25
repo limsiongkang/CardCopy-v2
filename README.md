@@ -336,3 +336,50 @@ turns polite monitoring into something a site will notice and block.
 | `run.ps1` | What you type to run it. |
 | `install_schedule.ps1` | Sets up (or removes) the 7am schedule. |
 | `logs/` | One log file per day. |
+
+
+## Speed
+
+Each page is fetched the cheapest way that still gives a trustworthy result:
+
+1. **A fast request** that impersonates Chrome. Most shops put their product
+   data straight into the page they send, so this takes under a second.
+2. **The stealth browser**, only if the fast request was refused or came back
+   without product data (a bot check, or a page built by JavaScript). One
+   browser is started for the whole run and reused, not relaunched per page.
+
+A fast result is only accepted when it contains real product data, so a
+blocked or empty page never turns into a misleading row.
+
+Most of a run's time is now the politeness delay (`DELAY_BETWEEN_URLS`),
+which only applies between pages on the **same** site. Lowering it speeds
+things up but makes the tool look less like a person browsing.
+
+Settings in `.env`: `FAST_MODE` (default `true`), `NETWORK_IDLE` (default
+`false`), `HTTP_TIMEOUT_SECONDS` (default `20`).
+
+## Category pages
+
+A line in `competitors.txt` can be a single product page or a whole category
+page. You do not have to mark which - it is worked out from the page.
+
+A category page produces **one row per product**, and each row carries that
+product's own link rather than the category's. That matters: the snapshot,
+the alerts and the sheet history are all keyed on the URL, so without a
+distinct link per product a price drop could not be traced to the product it
+belongs to.
+
+Force listing mode for a category page that is misread as one product:
+
+```
+list:https://example-shop.com/collections/all
+```
+
+Two limits worth knowing:
+
+- Only the **first page** of a category is read. Paginated shops need each
+  page listed, or a "show all" URL.
+- A category grid usually shows less than a product page. Where a shop hides
+  stock status on the grid, that column reads `Unknown` for those rows even
+  though the product page would have shown it.
+
