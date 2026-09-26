@@ -46,5 +46,27 @@
 # category is read; for a paginated shop, list each page.
 # ---------------------------------------------------------------------------
 
-list:variants:https://cambioroasters.com/collections/all
-variants:https://cambioroasters.com/collections/all/products/keurig-k-cups-colombian-organic?selling_plan=1833762993
+variants:https://www.freshroastedcoffee.com/products/black-knight-fto-coffee
+variants:https://www.freshroastedcoffee.com/products/guatemala-huehuetenango-fto-coffee
+variants:https://www.freshroastedcoffee.com/products/ethiopian-yirgacheffe-fto-coffee
+variants:https://www.freshroastedcoffee.com/products/costa-rica-tarrazu-coffee
+variants:https://www.freshroastedcoffee.com/products/colombian-fto-coffee
+variants:https://www.freshroastedcoffee.com/products/colombian-supremo-coffee
+variants:https://www.freshroastedcoffee.com/products/sumatra-fto-coffee
+variants:https://www.freshroastedcoffee.com/products/organic-mexican-coffee
+variants:https://www.freshroastedcoffee.com/products/tanzanian-peaberry-coffee
+variants:https://www.freshroastedcoffee.com/products/black-knight-swp-decaf-fto-coffee
+variants:https://beanbox.com/coffee/roast/drink-coffee-do-stuff-tanzania-songwe-peaberry/3305
+variants:https://beanbox.com/coffee/roast/devocion-la-riviera-culturing-niu/3302
+variants:https://beanbox.com/coffee/roast/devocion-colombia-gesha-las-flores/3182
+variants:https://beanbox.com/coffee/roast/drink-coffee-do-stuff-el-salvador-santa-leticia/3306
+variants:https://beanbox.com/coffee/roast/ruby-coffee-roasters-kenya-muranga-gondo-ab/3296
+variants:https://beanbox.com/coffee/roast/evans-brothers-coffee-costa-rica-perla-negra/3184
+variants:https://beanbox.com/coffee/roast/zoka-coffee-autumn-blend-2026/3298
+variants:https://beanbox.com/coffee/roast/bonlife-coffee-colombia---passion-fruit-co-ferment/3308
+variants:https://beanbox.com/coffee/roast/stamp-act-bochessa-natural---sidama-ethiopia/3301
+variants:https://beanbox.com/coffee/roast/methodical-roasting-blue-boy/1348
+variants:https://cambioroasters.com/products/variety-pack-60-count-pods
+variants:https://cambioroasters.com/products/half-caff
+variants:https://cambioroasters.com/products/pumpkin-spice-limited-edition
+variants:https://cambioroasters.com/products/special-dark-blend-dark-roast-coffee-pods?selling_plan=2593325233

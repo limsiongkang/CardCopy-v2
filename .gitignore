@@ -16,3 +16,8 @@ leads/*.csv
 
 # Test shop runtime state
 testshop/layout.txt
+
+# PyInstaller build output. The exe is rebuilt with build_exe.bat.
+build/
+*.spec
+CompetitorMonitor.exe

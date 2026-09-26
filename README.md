@@ -151,33 +151,31 @@ That produces a sheet called **Acme Ltd - Competitor Intel**.
 
 ## Step 5 — Test it, then schedule it
 
-Open PowerShell in this folder (right-click the folder while holding Shift →
-*Open PowerShell window here*), and work through these in order.
+**Double-click `CompetitorMonitor.exe`** in this folder. A small menu opens:
 
-**a) Check one page, write nothing:**
-
-```powershell
-.\run.ps1 -DryRun -Limit 1
 ```
+   1  Run now        check prices, update the Google Sheet, email if changed
+   2  Test run       check prices only - changes nothing
+   3  Quick test     like 2, but only the first 3 URLs
+   4  Self-test      check the code itself (offline, ~1 second)
+   5  Test shop      run against the local pretend shop (TEST tabs only)
+```
+
+Type a number and press Enter. When it finishes, the window waits for you to
+press Enter, so you can read the results before it closes.
+
+**a) Check a few pages, write nothing:** choose **3**.
 
 You should see the product name, price and stock status printed in a table.
 Nothing is sent and nothing is saved.
 
-**b) Check everything, still writing nothing:**
-
-```powershell
-.\run.ps1 -DryRun
-```
+**b) Check everything, still writing nothing:** choose **2**.
 
 Look down the table for rows saying `FAILED` or showing no price. Those sites
 need a closer look — see *When a site will not read* below.
 
 **c) A real run.** This creates the sheet, writes the first rows and, because
-there is nothing to compare against yet, sends no alert email:
-
-```powershell
-.\run.ps1
-```
+there is nothing to compare against yet, sends no alert email: choose **1**.
 
 The script prints the address of the new sheet. It also prints a line beginning
 `GOOGLE_SHEET_ID=` — **copy that line into your `.env`**, so tomorrow's run uses
@@ -186,7 +184,7 @@ the same sheet instead of hunting for it by name.
 **d) Check the email works** without waiting for a price to change:
 
 ```powershell
-.\run.ps1 -AlwaysEmail
+.\CompetitorMonitor.exe --always-email
 ```
 
 **e) Switch on the 7am schedule:**
@@ -243,14 +241,32 @@ counted in the email summary instead.
 
 ## Everyday commands
 
+The easy way: **double-click `CompetitorMonitor.exe`** and pick from the menu.
+
+For anything the menu does not cover, give the exe options from PowerShell:
+
 ```powershell
-.\run.ps1                    # normal run
-.\run.ps1 -DryRun            # test: change nothing, send nothing
-.\run.ps1 -Limit 5           # only the first 5 URLs
-.\run.ps1 -NoEmail           # update the sheet, skip the email
-.\run.ps1 -AlwaysEmail       # email even when nothing changed
-.\run.ps1 -Url "https://..." # check one page
+.\CompetitorMonitor.exe                     # the menu
+.\CompetitorMonitor.exe --dry-run           # test: change nothing, send nothing
+.\CompetitorMonitor.exe --limit 5           # only the first 5 URLs
+.\CompetitorMonitor.exe --no-email          # update the sheet, skip the email
+.\CompetitorMonitor.exe --always-email      # email even when nothing changed
+.\CompetitorMonitor.exe --url "https://..." # check one page
+.\CompetitorMonitor.exe --test              # the local test shop
 ```
+
+`run.ps1` still works exactly as before (`.\run.ps1 -DryRun` and so on) if you
+prefer it - the exe and `run.ps1` run the same code with the same Python.
+
+**The 7am schedule runs `CompetitorMonitor.exe --scheduled`.** `--scheduled`
+skips the menu and the "press Enter" pause so the unattended run can finish on
+its own. Do not remove it from the task.
+
+**Editing the project does not need a rebuild.** The exe is a small launcher
+that runs `monitor.py` fresh each time, so changes to `.py` files,
+`competitors.txt`, `selectors.json` or `.env` take effect on the next click.
+Only run `build_exe.bat` if `launcher.py` changes or the exe is missing - for
+example after cloning the project from GitHub, where the exe is not stored.
 
 Every run also writes a log to the `logs` folder, named for the date. If a 7am
 run misbehaves, that file is the place to look.
@@ -333,7 +349,9 @@ turns polite monitoring into something a site will notice and block.
 | `sheets.py` | Reads and writes the Google Sheet. |
 | `notify.py` | Builds and sends the email. |
 | `config.py` | Loads `.env` and checks it for mistakes. |
-| `run.ps1` | What you type to run it. |
+| `CompetitorMonitor.exe` | Double-click to run. Also what the 7am schedule runs. |
+| `launcher.py`, `build_exe.bat` | The exe's source, and the script that rebuilds it. |
+| `run.ps1` | The PowerShell way to run it - same options, same result. |
 | `install_schedule.ps1` | Sets up (or removes) the 7am schedule. |
 | `logs/` | One log file per day. |
 

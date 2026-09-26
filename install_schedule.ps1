@@ -1,8 +1,8 @@
 <#
     Sets up the daily 7:00 am run in Windows Task Scheduler.
 
-    Run this ONCE, after you have filled in .env and tested with
-    .\run.ps1 -DryRun
+    Run this ONCE, after you have filled in .env and tested by
+    double-clicking CompetitorMonitor.exe and choosing 2 (Test run).
 
     Usage:
         .\install_schedule.ps1                  run at 7:00 am while you are logged in
@@ -49,13 +49,9 @@ if (-not (Test-Path (Join-Path $here '.env'))) {
     Write-Warning "See README.md, or copy .env.example to .env and fill it in."
 }
 
-$candidates = @(
-    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
-    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-)
-$python = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $python) {
-    Write-Error "Could not find Python. Install Python 3.10+ from python.org and try again."
+$exe = Join-Path $here 'CompetitorMonitor.exe'
+if (-not (Test-Path $exe)) {
+    Write-Error "CompetitorMonitor.exe was not found. Double-click build_exe.bat to create it, then run this again."
     exit 3
 }
 
@@ -67,11 +63,13 @@ try {
 }
 
 # ---------------------------------------------------------------- build
-# Call python.exe directly rather than going through PowerShell, so that
-# PowerShell's execution policy can never block the daily run.
+# Run the exe directly - no PowerShell in the chain, so PowerShell's execution
+# policy can never block the daily run. --scheduled matters: it skips the menu
+# and the "press Enter to close" prompt, which would otherwise leave the 7am
+# run waiting for a keypress forever.
 $action = New-ScheduledTaskAction `
-    -Execute $python `
-    -Argument "`"$script`"" `
+    -Execute $exe `
+    -Argument "--scheduled" `
     -WorkingDirectory $here
 
 $trigger = New-ScheduledTaskTrigger -Daily -At $parsed
@@ -110,7 +108,7 @@ Write-Host ""
 Write-Host "Scheduled." -ForegroundColor Green
 Write-Host "  Task name : $taskName"
 Write-Host "  Runs      : every day at $Time"
-Write-Host "  Using     : $python"
+Write-Host "  Command   : $exe --scheduled"
 Write-Host "  Folder    : $here"
 if ($RunWhenLoggedOff) {
     Write-Host "  Mode      : runs whether or not you are logged in (PC must be switched on)"
