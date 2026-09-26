@@ -38,6 +38,9 @@ class SheetsError(Exception):
 # ----------------------------------------------------------------------
 
 def connect() -> gspread.Client:
+    if config.PREFER_IPV4:
+        import netfix
+        netfix.prefer_ipv4()
     key_file = config.service_account_path()
     if not key_file.exists():
         raise SheetsError(
@@ -133,31 +136,109 @@ def open_workbook(client: gspread.Client, log=print):
 # Presentation
 # ----------------------------------------------------------------------
 
-_HEADER_BG = {"red": 0.17, "green": 0.24, "blue": 0.31}
-_BAND_BG = {"red": 0.96, "green": 0.97, "blue": 0.98}
-_BAD_BG = {"red": 0.99, "green": 0.91, "blue": 0.91}
-_BAD_FG = {"red": 0.70, "green": 0.11, "blue": 0.11}
-_WARN_BG = {"red": 1.00, "green": 0.96, "blue": 0.88}
-_WARN_FG = {"red": 0.60, "green": 0.40, "blue": 0.00}
+# ----------------------------------------------------------------------
+# One look for every tab
+# ----------------------------------------------------------------------
+#
+# Formatting is decided by column NAME, not position, so a column that
+# appears on several tabs (price, in stock, URL...) is always the same width,
+# alignment and colours wherever it is.
+#
+# Colour means the same thing everywhere:
+#   green  - up / available   (in stock, back in stock, price went up, +9.99)
+#   red    - down / sold out  (out of stock, price went down, -7.89)
+#   blue   - new product
+#   grey   - no information   (stock unknown, page could not be read)
 
-# date, competitor, product, <4th>, <5th>, <6th>, URL
-_WIDTHS = [125, 165, 270, 105, 95, 95, 360]
+_COLOURS = {
+    "green":  ({"red": 0.85, "green": 0.94, "blue": 0.87}, {"red": 0.09, "green": 0.42, "blue": 0.18}),
+    "red":    ({"red": 0.99, "green": 0.88, "blue": 0.88}, {"red": 0.70, "green": 0.11, "blue": 0.11}),
+    "blue":   ({"red": 0.87, "green": 0.92, "blue": 0.99}, {"red": 0.10, "green": 0.32, "blue": 0.70}),
+    "grey":   ({"red": 0.93, "green": 0.93, "blue": 0.94}, {"red": 0.38, "green": 0.40, "blue": 0.43}),
+}
+
+# Words that colour a cell, per column. Checked top to bottom and the first
+# match wins - so a cell saying "price up 1.00; went out of stock" is red.
+_STATUS_RULES = {
+    "in stock": [
+        ("EQ", "yes", "green"),
+        ("EQ", "no", "red"),
+        ("EQ", "unknown", "grey"),
+    ],
+    "alert": [
+        ("EQ", "out of stock", "red"),
+        ("EQ", "price drop", "red"),
+        ("EQ", "back in stock", "green"),
+        ("EQ", "price rise", "green"),
+    ],
+    "change": [
+        ("GT", "0", "green"),
+        ("LT", "0", "red"),
+    ],
+    "change since last run": [
+        ("CONTAINS", "could not be read", "grey"),
+        ("CONTAINS", "went out of stock", "red"),
+        ("CONTAINS", "price down", "red"),
+        ("CONTAINS", "back in stock", "green"),
+        ("CONTAINS", "price up", "green"),
+        ("EQ", "new", "blue"),
+    ],
+}
+
+# The colour key shown beside the data on the Latest tab.
+_LEGEND = [
+    ("green", "Up: in stock, back in stock, price went up"),
+    ("red", "Down: out of stock, price went down"),
+    ("blue", "New product"),
+    ("grey", "Unknown / page could not be read"),
+]
+
+_WIDTH = {
+    "date": 125, "competitor": 160, "product": 280, "variant": 190,
+    "price": 90, "sale price": 90, "in stock": 80,
+    "alert": 115, "was": 90, "now": 90, "change": 85,
+    "change since last run": 250, "url": 330,
+}
+_MONEY = {"price", "sale price"}                 # two decimals, right aligned
+_TEXT = {"product", "variant", "was", "now"}     # stored exactly as written
+_RIGHT = {"was", "now"}                          # line up with the price columns
+_CENTRE = {"in stock", "alert"}                  # short status words
+_SIGNED = {"change"}                             # +9.99 / -7.89
+_LINKS = {"competitor", "url"}
 
 
-def polish(workbook, worksheet, headers: list[str], money_columns: list[int],
-           flag_column: int, flag_rules: list[tuple[str, dict, dict]], log=print) -> None:
+def ensure_default_grid(worksheet) -> None:
     """
-    Make a tab presentable: frozen bold header, sized columns, right-aligned
-    money, centred status, zebra striping and colour-coded status cells.
+    Give a tab the size of an ordinary new sheet: columns A-Z, 1000 rows.
 
-    Safe to re-run - existing banding and conditional rules are cleared first
-    so repeated runs do not stack duplicates.
+    Tabs created by the API come out exactly as wide as asked for - eight
+    columns, A to H - which looks cramped and leaves nowhere to add notes of
+    your own beside the data.
+    """
+    try:
+        if worksheet.col_count < 26:
+            worksheet.add_cols(26 - worksheet.col_count)
+        if worksheet.row_count < 1000:
+            worksheet.add_rows(1000 - worksheet.row_count)
+    except Exception:  # noqa: BLE001 - cosmetic only
+        pass
+
+
+def polish(workbook, worksheet, headers: list[str], log=print) -> None:
+    """
+    Apply the one house look to a tab. Everything follows from the column
+    names in `headers` - see "One look for every tab" above.
+
+    It also strips styling earlier versions applied (header bands, striping,
+    filter buttons, borders), so older sheets are cleaned up too. Safe to
+    re-run on every run.
     """
     sheet_id = worksheet.id
-    last_col = len(headers)
+    ensure_default_grid(worksheet)
+    names = [h.strip().lower() for h in headers]
 
-    # --- clear anything a previous run added -------------------------
-    clear: list[dict] = []
+    # --- remove striping, old colour rules and the filter ----------------
+    clear: list[dict] = [{"clearBasicFilter": {"sheetId": sheet_id}}]
     try:
         meta = workbook.fetch_sheet_metadata()
         for sheet in meta.get("sheets", []):
@@ -170,114 +251,118 @@ def polish(workbook, worksheet, headers: list[str], money_columns: list[int],
             for index in range(len(rules) - 1, -1, -1):
                 clear.append({"deleteConditionalFormatRule":
                               {"sheetId": sheet_id, "index": index}})
-    except Exception:  # noqa: BLE001 - cosmetic only, never fail a run for it
+    except Exception:  # noqa: BLE001
         pass
-    if clear:
+    for request in clear:
+        # One at a time: clearing a filter that is not there is an error, and
+        # it must not take the other clean-up requests down with it.
         try:
-            workbook.batch_update({"requests": clear})
+            workbook.batch_update({"requests": [request]})
         except Exception:  # noqa: BLE001
             pass
 
+    def column(index: int) -> dict:
+        return {"sheetId": sheet_id, "startRowIndex": 1,
+                "startColumnIndex": index, "endColumnIndex": index + 1}
+
     requests: list[dict] = [
-        # Freeze the header so it stays put while scrolling.
-        {"updateSheetProperties": {
-            "properties": {"sheetId": sheet_id,
-                           "gridProperties": {"frozenRowCount": 1}},
-            "fields": "gridProperties.frozenRowCount"}},
-        # Header band.
+        # Header: bold and frozen, otherwise plain - across the whole row.
         {"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": last_col},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": _HEADER_BG,
-                "horizontalAlignment": "LEFT",
-                "verticalAlignment": "MIDDLE",
-                "padding": {"top": 4, "bottom": 4, "left": 10, "right": 10},
-                "textFormat": {"bold": True, "fontSize": 10,
-                               "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                                           "verticalAlignment": "MIDDLE"}},
             "fields": "userEnteredFormat"}},
+        {"updateSheetProperties": {
+            "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount"}},
         {"updateDimensionProperties": {
-            "range": {"sheetId": sheet_id, "dimension": "ROWS",
-                      "startIndex": 0, "endIndex": 1},
-            "properties": {"pixelSize": 34}, "fields": "pixelSize"}},
-        # Body text a touch smaller, vertically centred, with breathing room.
+            "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": 24}, "fields": "pixelSize"}},
+        # Body: plain cells, every one vertically centred (which is also what
+        # puts a merged product name in the middle of its block).
         {"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": last_col},
-            "cell": {"userEnteredFormat": {
-                "verticalAlignment": "MIDDLE",
-                "padding": {"top": 2, "bottom": 2, "left": 10, "right": 10},
-                "textFormat": {"fontSize": 10}}},
-            "fields": "userEnteredFormat(verticalAlignment,padding,textFormat)"}},
+            "range": {"sheetId": sheet_id, "startRowIndex": 1},
+            "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE"}},
+            "fields": "userEnteredFormat(backgroundColor,borders,padding,textFormat,"
+                      "verticalAlignment,horizontalAlignment)"}},
     ]
 
-    # --- column widths ------------------------------------------------
-    for index in range(min(last_col, len(_WIDTHS))):
-        requests.append({"updateDimensionProperties": {
-            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                      "startIndex": index, "endIndex": index + 1},
-            "properties": {"pixelSize": _WIDTHS[index]}, "fields": "pixelSize"}})
+    for index, name in enumerate(names):
+        width = _WIDTH.get(name)
+        if width:
+            requests.append({"updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                          "startIndex": index, "endIndex": index + 1},
+                "properties": {"pixelSize": width}, "fields": "pixelSize"}})
 
-    # --- money columns: two decimals, right aligned --------------------
-    for index in money_columns:
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": 1,
-                      "startColumnIndex": index, "endColumnIndex": index + 1},
-            "cell": {"userEnteredFormat": {
-                "horizontalAlignment": "RIGHT",
-                "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
-            "fields": "userEnteredFormat(horizontalAlignment,numberFormat)"}})
+        if name in _MONEY:
+            fmt = {"horizontalAlignment": "RIGHT",
+                   "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}
+        elif name in _SIGNED:
+            # A real number, shown with its sign; it can still be sorted and summed.
+            fmt = {"horizontalAlignment": "RIGHT",
+                   "numberFormat": {"type": "NUMBER", "pattern": "+#,##0.00;-#,##0.00;0.00"}}
+        elif name in _TEXT:
+            # Explicit, because a column inserted beside a money column
+            # inherits its right alignment and number format.
+            fmt = {"horizontalAlignment": "RIGHT" if name in _RIGHT else "LEFT",
+                   "numberFormat": {"type": "TEXT"}}
+        elif name in _CENTRE:
+            fmt = {"horizontalAlignment": "CENTER"}
+        else:
+            fmt = None
+        if fmt:
+            requests.append({"repeatCell": {
+                "range": column(index), "cell": {"userEnteredFormat": fmt},
+                "fields": "userEnteredFormat(" + ",".join(fmt) + ")"}})
 
-    # --- status column centred ----------------------------------------
-    if flag_column >= 0:
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": 1,
-                      "startColumnIndex": flag_column, "endColumnIndex": flag_column + 1},
-            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
-            "fields": "userEnteredFormat.horizontalAlignment"}})
+        if name in _LINKS:
+            # The body reset clears text formatting, link colour included.
+            requests.append({"repeatCell": {
+                "range": column(index),
+                "cell": {"userEnteredFormat": {"textFormat": {
+                    "underline": True,
+                    "foregroundColor": {"red": 0.07, "green": 0.33, "blue": 0.80}}}},
+                "fields": "userEnteredFormat.textFormat"}})
 
-    # --- link columns look like links ------------------------------------
-    # The body repeatCell above replaces textFormat wholesale, so the link
-    # styling has to be put back explicitly or the cells render as plain text.
-    for index in (1, last_col - 1):
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": 1,
-                      "startColumnIndex": index, "endColumnIndex": index + 1},
-            "cell": {"userEnteredFormat": {"textFormat": {
-                "fontSize": 10,
-                "underline": True,
-                "foregroundColor": {"red": 0.05, "green": 0.35, "blue": 0.75}}}},
-            "fields": "userEnteredFormat.textFormat"}})
-
-    # --- zebra striping -------------------------------------------------
-    requests.append({"addBanding": {"bandedRange": {
-        "range": {"sheetId": sheet_id, "startRowIndex": 1,
-                  "startColumnIndex": 0, "endColumnIndex": last_col},
-        "rowProperties": {
-            "firstBandColor": {"red": 1, "green": 1, "blue": 1},
-            "secondBandColor": _BAND_BG}}}})
-
-    # --- colour-code the status column ----------------------------------
-    for text, background, foreground in flag_rules:
-        requests.append({"addConditionalFormatRule": {"index": 0, "rule": {
-            "ranges": [{"sheetId": sheet_id, "startRowIndex": 1,
-                        "startColumnIndex": flag_column,
-                        "endColumnIndex": flag_column + 1}],
-            "booleanRule": {
-                "condition": {"type": "TEXT_EQ",
-                              "values": [{"userEnteredValue": text}]},
-                "format": {"backgroundColor": background,
-                           "textFormat": {"bold": True, "foregroundColor": foreground}}}}}})
-
-    # --- a filter across the header --------------------------------------
-    requests.append({"setBasicFilter": {"filter": {
-        "range": {"sheetId": sheet_id, "startRowIndex": 0,
-                  "startColumnIndex": 0, "endColumnIndex": last_col}}}})
+    # --- status colours, in priority order ----------------------------------
+    priority = 0
+    for index, name in enumerate(names):
+        for condition, text, colour in _STATUS_RULES.get(name, []):
+            background, foreground = _COLOURS[colour]
+            requests.append({"addConditionalFormatRule": {"index": priority, "rule": {
+                "ranges": [column(index)],
+                "booleanRule": {
+                    "condition": {"type": {"EQ": "TEXT_EQ", "CONTAINS": "TEXT_CONTAINS",
+                                           "GT": "NUMBER_GREATER", "LT": "NUMBER_LESS"}[condition],
+                                  "values": [{"userEnteredValue": text}]},
+                    "format": {"backgroundColor": background,
+                               "textFormat": {"bold": True, "foregroundColor": foreground}}}}}})
+            priority += 1
 
     try:
         workbook.batch_update({"requests": requests})
     except Exception as exc:  # noqa: BLE001 - never fail a run over cosmetics
         log(f"  (could not fully format '{worksheet.title}': {exc})")
+
+
+def _legend_requests(worksheet, column: int) -> tuple[list[list[str]], list[dict]]:
+    """Values and formatting for the colour key, placed in `column`."""
+    values = [["Colour key"]] + [[label] for _, label in _LEGEND]
+    requests: list[dict] = [{"updateDimensionProperties": {
+        "range": {"sheetId": worksheet.id, "dimension": "COLUMNS",
+                  "startIndex": column, "endIndex": column + 1},
+        "properties": {"pixelSize": 260}, "fields": "pixelSize"}}]
+    for row, (colour, _) in enumerate(_LEGEND, start=1):
+        background, foreground = _COLOURS[colour]
+        requests.append({"repeatCell": {
+            "range": {"sheetId": worksheet.id, "startRowIndex": row, "endRowIndex": row + 1,
+                      "startColumnIndex": column, "endColumnIndex": column + 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": background,
+                "textFormat": {"bold": True, "foregroundColor": foreground}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    return values, requests
 
 
 def _column_letter(index: int) -> str:
@@ -336,23 +421,18 @@ def linkify_tab(worksheet, competitor_col: int = 1, url_col: int = 6, log=print)
 
 
 def polish_all(workbook, data_tab, alerts_tab, log=print) -> None:
-    """Apply the house style to both tabs."""
-    linkify_tab(data_tab, log=log)
-    linkify_tab(alerts_tab, log=log)
-    polish(
-        workbook, data_tab, config.DATA_HEADERS,
-        money_columns=[3, 4], flag_column=5,
-        flag_rules=[("no", _BAD_BG, _BAD_FG),
-                    ("unknown", _WARN_BG, _WARN_FG)],
-        log=log,
-    )
-    polish(
-        workbook, alerts_tab, config.ALERT_HEADERS,
-        money_columns=[], flag_column=3,
-        flag_rules=[("out of stock", _BAD_BG, _BAD_FG),
-                    ("price drop", _WARN_BG, _WARN_FG)],
-        log=log,
-    )
+    """Apply the house look to the history and alert tabs."""
+    linkify_tab(data_tab, url_col=config.DATA_HEADERS.index("URL"), log=log)
+    linkify_tab(alerts_tab, url_col=config.ALERT_HEADERS.index("URL"), log=log)
+    polish(workbook, data_tab, config.DATA_HEADERS, log=log)
+    polish(workbook, alerts_tab, config.ALERT_HEADERS, log=log)
+
+
+def _only_missing_columns(current: list[str], wanted: list[str]) -> bool:
+    """True if `current` is `wanted` with some columns left out, order intact."""
+    remaining = iter(wanted)
+    return bool(current) and len(current) < len(wanted) \
+        and all(name in remaining for name in current)
 
 
 def ensure_tabs(workbook, log=print):
@@ -362,12 +442,39 @@ def ensure_tabs(workbook, log=print):
     def build(title: str, headers: list[str]):
         if title in existing:
             worksheet = existing[title]
-            current = worksheet.row_values(1)
-            if [c.strip().lower() for c in current] != [h.lower() for h in headers]:
-                worksheet.update([headers], "A1")
-            return worksheet
+            current = [c.strip().lower() for c in worksheet.row_values(1)]
+            wanted = [h.lower() for h in headers]
+            if current == wanted:
+                return worksheet
 
-        worksheet = workbook.add_worksheet(title=title, rows=1000, cols=len(headers))
+            if _only_missing_columns(current, wanted):
+                # An older layout: same columns in the same order, some new
+                # ones missing. Insert each as a real column so every existing
+                # row shifts across with it - rewriting the header alone
+                # would put each old value under the wrong heading.
+                added = []
+                for position, name in enumerate(wanted):
+                    if position >= len(current) or current[position] != name:
+                        worksheet.insert_cols([[headers[position]]], col=position + 1)
+                        current.insert(position, name)
+                        added.append(headers[position])
+                log(f"  Added {', '.join(repr(a) for a in added)} to the '{title}' tab "
+                    f"(existing rows kept in place).")
+                return worksheet
+
+            if not any(current):
+                worksheet.update([headers], "A1")
+                return worksheet
+
+            # Some other layout with data under it. Relabelling it would
+            # silently misfile every value, so stop and say why instead.
+            raise SheetsError(
+                f"The '{title}' tab has column headings this version does not "
+                f"recognise ({', '.join(current)}). Rename the tab to keep its "
+                f"data, and the next run will start a fresh '{title}' tab."
+            )
+
+        worksheet = workbook.add_worksheet(title=title, rows=1000, cols=max(26, len(headers)))
         worksheet.update([headers], "A1")
         worksheet.freeze(rows=1)
         worksheet.format("A1:Z1", {"textFormat": {"bold": True}})
@@ -380,7 +487,8 @@ def ensure_tabs(workbook, log=print):
     # Google always creates a workbook with a tab called "Sheet1". Remove it
     # once our real tabs exist so the sheet is not confusing to open.
     for title, worksheet in existing.items():
-        if title in ("Sheet1", "Sheet 1") and len(workbook.worksheets()) > 2:
+        if title in ("Sheet1", "Sheet 1") and len(workbook.worksheets()) > 2 \
+                and title not in (config.DATA_TAB, config.ALERTS_TAB, config.LATEST_TAB):
             try:
                 workbook.del_worksheet(worksheet)
             except Exception:  # noqa: BLE001
@@ -429,6 +537,7 @@ def previous_run(data_tab) -> tuple[str, dict[str, dict]]:
     idx_stock = column("in stock")
     idx_url = column("url")
     idx_product = column("product")
+    idx_variant = column("variant")
 
     if min(idx_date, idx_url) < 0:
         return "", {}
@@ -449,6 +558,7 @@ def previous_run(data_tab) -> tuple[str, dict[str, dict]]:
             continue
         snapshot[url] = {
             "product": row[idx_product].strip() if 0 <= idx_product < len(row) else "",
+            "variant": row[idx_variant].strip() if 0 <= idx_variant < len(row) else "",
             "price": _to_float(row[idx_price]) if 0 <= idx_price < len(row) else None,
             "sale_price": _to_float(row[idx_sale]) if 0 <= idx_sale < len(row) else None,
             "in_stock": row[idx_stock].strip() if 0 <= idx_stock < len(row) else "",
@@ -488,6 +598,51 @@ def _home_page(url: str) -> str:
     return ""
 
 
+def _text(value) -> str:
+    """
+    A cell that must stay exactly the text it is.
+
+    Rows are written in USER_ENTERED mode so the competitor link formula
+    works - but in that mode Sheets also *interprets* everything else. A
+    variant called "3/4" becomes a date, "250" becomes a number shown as
+    250.00, and a product name beginning with "=" becomes a formula. That
+    last one matters: names come from competitors' web pages, so a hostile
+    page could put a formula into this sheet. A leading apostrophe tells
+    Sheets "this is text"; it is not displayed and is not part of the value.
+    """
+    value = "" if value is None else str(value)
+    return "'" + value if value else ""
+
+
+def _merge_requests(sheet_id: int, column: int, blocks: list[tuple[int, int]]) -> list[dict]:
+    """mergeCells requests for each block of 2+ rows, 0-based [start, end)."""
+    return [
+        {"mergeCells": {"range": {"sheetId": sheet_id,
+                                  "startRowIndex": start, "endRowIndex": end,
+                                  "startColumnIndex": column, "endColumnIndex": column + 1},
+                        "mergeType": "MERGE_ALL"}}
+        for start, end in blocks if end - start > 1
+    ]
+
+
+def _product_blocks(products, first_row: int) -> list[tuple[int, int]]:
+    """
+    Row ranges, 0-based [start, end), of consecutive rows belonging to the
+    same product page. Variants of one product are always written together.
+    """
+    blocks: list[tuple[int, int]] = []
+    current, start = None, first_row
+    for offset, product in enumerate(products):
+        key = product.page_url or product.url
+        if key != current:
+            if current is not None:
+                blocks.append((start, first_row + offset))
+            current, start = key, first_row + offset
+    if current is not None:
+        blocks.append((start, first_row + len(products)))
+    return blocks
+
+
 def product_row(product, run_date: str) -> list:
     # Stock is written lower case ("yes"/"no") to match the rows already on
     # the Results tab. The comparison logic lower-cases before comparing, so
@@ -500,7 +655,8 @@ def product_row(product, run_date: str) -> list:
     return [
         run_date,
         _link(_home_page(product.url), product.competitor),
-        product.name or ("ERROR: " + product.error if product.error else ""),
+        _text(product.name or ("ERROR: " + product.error if product.error else "")),
+        _text(product.variant),
         product.price if product.price is not None else "",
         product.sale_price if product.sale_price is not None else "",
         stock,
@@ -513,8 +669,25 @@ def product_row(product, run_date: str) -> list:
 
 def append_data(data_tab, products, run_date: str) -> int:
     rows = [product_row(p, run_date) for p in products]
-    if rows:
-        data_tab.append_rows(rows, value_input_option="USER_ENTERED")
+    if not rows:
+        return 0
+    response = data_tab.append_rows(rows, value_input_option="USER_ENTERED")
+
+    if config.MERGE_PRODUCT_NAMES:
+        # Where did the rows land? The API reports it, e.g. "Results!A220:H437".
+        import re
+        updated = ((response or {}).get("updates") or {}).get("updatedRange", "")
+        match = re.search(r"![A-Z]+(\d+):", updated)
+        if match:
+            first_row = int(match.group(1)) - 1                  # 0-based
+            column = config.DATA_HEADERS.index("product")
+            requests = _merge_requests(data_tab.id, column,
+                                       _product_blocks(products, first_row))
+            if requests:
+                try:
+                    data_tab.spreadsheet.batch_update({"requests": requests})
+                except Exception:  # noqa: BLE001 - cosmetic; the data is written
+                    pass
     return len(rows)
 
 
@@ -523,10 +696,13 @@ def append_alerts(alerts_tab, alerts: list[dict], run_date: str) -> int:
         [
             run_date,
             _link(_home_page(a["url"]), a["competitor"]),
-            a["product"],
+            _text(a["product"]),
+            _text(a.get("variant", "")),
             a["alert"],
-            a["was"],
-            a["now"],
+            # Text, so "18.00" stays "18.00" instead of becoming the number 18.
+            _text(a["was"]),
+            _text(a["now"]),
+            a["change"] if isinstance(a.get("change"), (int, float)) else "",
             a["url"],
         ]
         for a in alerts
@@ -534,6 +710,156 @@ def append_alerts(alerts_tab, alerts: list[dict], run_date: str) -> int:
     if rows:
         alerts_tab.append_rows(rows, value_input_option="USER_ENTERED")
     return len(rows)
+
+
+
+# ----------------------------------------------------------------------
+# The "Latest" tab - today's picture, grouped by product
+# ----------------------------------------------------------------------
+#
+# Results is the full history: every run appended, which makes it the right
+# place to track a price over time and the wrong place to check today's
+# prices across 20 variants. Latest is rewritten on every run with just the
+# current rows, in the order competitors.txt lists them, each product's
+# variants kept together and shaded as one block, and a column saying what
+# changed since the last run.
+
+def _page_of(url: str) -> str:
+    """https://shop/p?variant=3#x -> https://shop/p"""
+    return url.split("#", 1)[0].split("?", 1)[0]
+
+
+def change_text(product, previous: dict | None, snapshot: dict,
+                known_pages: set[str] | None = None) -> str:
+    """Plain-English difference between this row and the previous run."""
+    if product.error:
+        return "could not be read"
+    if not snapshot:
+        return ""                                   # first run ever
+    if previous is None:
+        # Switching a URL between normal and "variants:" changes its rows'
+        # identities - one product row becomes many variant rows, or the
+        # reverse. The product itself is not new; it just has no history in
+        # this shape yet, so say nothing rather than "new".
+        if known_pages is None:
+            known_pages = {_page_of(url) for url in snapshot}
+        page = product.page_url or _page_of(product.url)
+        if page in snapshot or page in known_pages:
+            return ""
+        return "new"
+
+    notes = []
+    was = previous.get("sale_price")
+    if was is None:
+        was = previous.get("price")
+    now = product.effective_price
+    if was is not None and now is not None and abs(now - was) >= 0.01:
+        direction = "down" if now < was else "up"
+        notes.append(f"price {direction} {abs(now - was):,.2f} (was {was:,.2f})")
+
+    was_stock = str(previous.get("in_stock") or "").strip().lower()
+    now_stock = product.stock_text().lower()
+    if was_stock == "yes" and now_stock == "no":
+        notes.append("went out of stock")
+    elif was_stock == "no" and now_stock == "yes":
+        notes.append("back in stock")
+    return "; ".join(notes)
+
+
+def latest_row(product, snapshot: dict, known_pages: set[str] | None = None) -> list:
+    stock = "unknown" if product.error else product.stock_text().lower()
+    return [
+        _link(_home_page(product.url), product.competitor),
+        _text(product.name or ("ERROR: " + product.error if product.error else "")),
+        _text(product.variant),
+        product.price if product.price is not None else "",
+        product.sale_price if product.sale_price is not None else "",
+        stock,
+        change_text(product, (snapshot or {}).get(product.url), snapshot or {}, known_pages),
+        product.url,
+    ]
+
+
+def _latest_tab(workbook, rows_needed: int, log=print):
+    title = config.LATEST_TAB
+    for worksheet in workbook.worksheets():
+        if worksheet.title == title:
+            return worksheet
+    worksheet = workbook.add_worksheet(title=title, rows=max(1000, rows_needed),
+                                       cols=max(26, len(config.LATEST_HEADERS)))
+    # First tab, so it is what the workbook opens on - except in test mode,
+    # where the TEST tab must not push the real one aside.
+    try:
+        if config.TEST_MODE:
+            raise RuntimeError("leave test tabs where they are")
+        workbook.batch_update({"requests": [{"updateSheetProperties": {
+            "properties": {"sheetId": worksheet.id, "index": 0},
+            "fields": "index"}}]})
+    except Exception:  # noqa: BLE001
+        pass
+    log(f"  Created the '{title}' tab.")
+    return worksheet
+
+
+def write_latest(workbook, products, snapshot: dict | None, log=print) -> int:
+    """Rewrite the Latest tab with this run's rows. Returns rows written."""
+    snapshot = snapshot or {}
+
+    # Keep run order; gather each product's variants into one block.
+    groups: dict[str, list] = {}
+    for product in products:
+        groups.setdefault(product.page_url or product.url, []).append(product)
+
+    known_pages = {_page_of(url) for url in snapshot}
+    body: list[list] = []
+    blocks: list[tuple[int, int]] = []          # (first row, end row), 0-based, header = 0
+    for group in groups.values():
+        start = len(body) + 1
+        body.extend(latest_row(p, snapshot, known_pages) for p in group)
+        blocks.append((start, len(body) + 1))
+
+    headers = config.LATEST_HEADERS
+    worksheet = _latest_tab(workbook, len(body) + 1, log=log)
+
+    if worksheet.row_count < len(body) + 1:
+        worksheet.add_rows(len(body) + 1 - worksheet.row_count)
+    if worksheet.col_count < len(headers):
+        worksheet.add_cols(len(headers) - worksheet.col_count)
+
+    # Last run's merged blocks fall on different rows; undo them first.
+    try:
+        workbook.batch_update({"requests": [{"unmergeCells": {"range": {
+            "sheetId": worksheet.id, "startRowIndex": 0,
+            "endRowIndex": worksheet.row_count,
+            "startColumnIndex": 0, "endColumnIndex": len(headers)}}}]})
+    except Exception:  # noqa: BLE001
+        pass
+    worksheet.clear()
+    worksheet.update([headers] + body, "A1", value_input_option="USER_ENTERED")
+
+    polish(workbook, worksheet, headers, log=log)
+
+    sheet_id = worksheet.id
+    requests: list[dict] = []
+
+    # One product name per product: merge its cell down across all of that
+    # product's variant rows.
+    if config.MERGE_PRODUCT_NAMES:
+        requests.extend(_merge_requests(sheet_id, headers.index("product"), blocks))
+
+    # Colour key, one empty column to the right of the data.
+    legend_column = len(headers) + 1
+    legend_values, legend_format = _legend_requests(worksheet, legend_column)
+    worksheet.update(legend_values, f"{_column_letter(legend_column)}1",
+                     value_input_option="RAW")
+    requests.extend(legend_format)
+
+    try:
+        workbook.batch_update({"requests": requests})
+    except Exception as exc:  # noqa: BLE001 - cosmetic only
+        log(f"  (could not fully format '{worksheet.title}': {exc})")
+
+    return len(body)
 
 
 def today() -> str:

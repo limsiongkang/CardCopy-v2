@@ -13,3 +13,6 @@ data/
 
 # Real people's names and work emails - not for a public repo.
 leads/*.csv
+
+# Test shop runtime state
+testshop/layout.txt

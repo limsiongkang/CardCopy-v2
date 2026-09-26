@@ -338,6 +338,130 @@ turns polite monitoring into something a site will notice and block.
 | `logs/` | One log file per day. |
 
 
+## Variants (sizes, colours, grinds...)
+
+Put `variants:` in front of a URL in `competitors.txt` and that product gets
+**one row per variant** (each size, colour, grind...), each with its own
+price, sale price and stock status. Without it, the product is one row.
+
+```
+https://shop.example/products/coffee               one row
+variants:https://shop.example/products/coffee      one row per variant
+list:variants:https://shop.example/collections/all every variant of every product
+```
+
+The words combine in either order, and work after a name too
+(`My Shop | variants:https://...`).
+
+This matters for stock in particular. A shop's headline data describes the
+product as a whole, and for a product with options it is often wrong -
+WooCommerce, for example, can mark a product "out of stock" while every size
+can be bought. The per-variant data is the truth, so it is what gets used.
+
+No clicking through options is needed. Shops ship every variant's price and
+stock inside the page, because the page's own script needs it to update the
+price when you pick an option. It is read from:
+
+- **Shopify** - the store's `/products/<name>.js` data file
+- **WooCommerce** - the variation data built into the product form
+- **Other platforms** - the schema.org variant format (`ProductGroup`)
+- **Beanbox-style pages** - size and grind prices kept in script tables
+  (one-time purchases only; each size takes the product's stock status,
+  because that is all such pages publish)
+
+Each variant's URL opens that exact variant, so clicking a row in the sheet
+takes you straight to what you are checking.
+
+A page that embeds no variant data keeps its single product-level row. If a
+shop you track shows a wrong stock status that way, that site needs a reader
+of its own.
+
+### Category pages
+
+Category pages are read from the shop's published product list (the
+schema.org `ItemList` many shops include for search engines) when there is
+one - exact, and unaffected by how the grid looks - and otherwise from the
+product tiles on the page.
+
+A plain `list:` line reads the category grid itself: one row per product,
+one page visit, fast. A `list:variants:` line also opens every product on the
+grid to read its variants, because a grid cannot show which sizes are in
+stock or what each costs. That is one page visit per product, with the
+politeness delay between them; `LISTING_MAX_PRODUCTS` (default 100) stops
+one huge category from running for hours.
+
+Without `variants:`, stock for a product with options comes from the shop's
+headline data, which can say "out of stock" while some sizes are available.
+Use `variants:` wherever stock matters.
+
+## The sheet
+
+| Tab | What it is for |
+|---|---|
+| **Latest** | Open this one. Today's rows only, rewritten each run, in `competitors.txt` order. Each product's variants sit together as a shaded block, and **change since last run** says what moved: `price down 2.00 (was 18.99)`, `went out of stock`, `back in stock`, `new`. |
+| **Results** | The full history - every run appended. For tracking a price over time. |
+
+A product's name is written once, in a single tall cell beside all of its
+variant rows, rather than repeated on every row. Google Sheets cannot sort a
+range containing merged cells, and filtering on the product column only
+matches each product's first row - filter on variant or URL instead, or set
+`MERGE_PRODUCT_NAMES=false` in `.env` to repeat the name on every row.
+| **Alerts** | Every price drop and stock-out, one row per variant. |
+
+The alert email merges identical changes to one product's variants, so a
+coffee selling out in all 21 size-and-grind options is one line, not 21. The
+Alerts tab still lists each one.
+
+Row volume grows with variants: a product with 21 options writes 21 history
+rows a run. That is fine for Google Sheets for a long time, but if the
+Results tab ever gets slow, archive old rows to a separate tab.
+
+## Testing the alerts
+
+A pretend shop runs on this computer so you can change prices yourself and
+watch the alerts fire. It never touches your real history: test runs write
+to separate **TEST Results**, **TEST Alerts** and **TEST Latest** tabs, keep
+their own comparison file, and test emails are marked `[TEST]`.
+
+1. Start the shop in its own PowerShell window and leave it open:
+   ```
+   .\start_testshop.ps1
+   ```
+   Its admin page opens at http://localhost:8765/admin.
+2. In another window, run a test check once to record the current prices:
+   ```
+   .\run.ps1 -Test
+   ```
+3. On the admin page, change a price, sale price or stock box and click
+   **Save changes** - or click **Simulate some changes**.
+4. Run `.\run.ps1 -Test` again. The changes appear in the TEST tabs, and
+   anything that alerts is emailed.
+
+What alerts: **any price change** - down or up, including a sale price
+starting or ending - and something going **from in stock to out of stock**.
+The Alerts tab's **change** column shows the difference: +9.99 in green,
+-7.89 in red. Set `ALERT_ON_PRICE_RISE=false` to alert on drops only.
+Back-in-stock alerts only with `ALERT_ON_BACK_IN_STOCK=true`.
+
+**What survives a redesign** (measured with the test shop's layouts):
+published product data and variant data are unaffected by new HTML and CSS;
+pages built by JavaScript are read through the browser; a site rule in
+`selectors.json` is recovered by adaptive mode, but only once the page has
+really changed (the product-name rule stops matching), and a guess never
+overrules a price the shop publishes. What does not survive: a category page
+whose product grid is replaced with unrecognisable markup and no published
+list - list those product pages directly instead.
+
+**Testing a redesign.** The admin page's **Shop layout** switch rebuilds the
+same products four ways - the original, a redesign with new HTML and CSS, a
+redesign with no product data at all, and a page built by JavaScript - so you
+can see what the monitor still reads when a competitor changes their site.
+Run a test once on the original layout first: that is when adaptive mode
+learns the page. Only one copy of the shop can run at a time.
+
+Close the shop's window when finished. The TEST tabs can be deleted at any
+time; the next test run recreates them.
+
 ## Speed
 
 Each page is fetched the cheapest way that still gives a trustworthy result:

@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Site rules for the test shop, written for its CLASSIC layout on purpose.",
+    "Switching the shop to another layout breaks these selectors, which is",
+    "what lets a test run show whether Scrapling's adaptive mode finds the",
+    "same elements again from what it remembered on a Classic run."
+  ],
+  "127.0.0.1": {
+    "name": "h1.product_title",
+    "price": "p.price .amount",
+    "sale_price": "p.price ins .amount",
+    "in_stock": "p.stock"
+  }
+}

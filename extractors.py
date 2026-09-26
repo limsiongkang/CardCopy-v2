@@ -385,6 +385,14 @@ _STOCK_SELECTORS = (
 )
 
 
+def _container(node) -> str:
+    """A stable description of the element that directly contains `node`."""
+    try:
+        return str(node.parent.generate_full_css_selector)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def from_css_rules(page, rules: dict | None, smart_css) -> dict:
     """
     Read the page using hand-written selectors from selectors.json.
@@ -402,7 +410,22 @@ def from_css_rules(page, rules: dict | None, smart_css) -> dict:
 
     found: dict = {}
 
+    # Has this page actually been redesigned? The product name is the canary:
+    # every product page has one. If the name rule still matches, the layout
+    # has not changed, so any other rule that finds nothing is finding nothing
+    # because that element really is not on this page (no stock line on a
+    # variant page, say) - and it must not be "recovered" into the nearest
+    # look-alike. Adaptive recovery is only allowed once the name rule fails
+    # too, which is what a redesign looks like.
     name_selector = rules.get("name")
+    if name_selector:
+        try:
+            redesigned = not page.css(name_selector)
+        except Exception:
+            redesigned = True
+    else:
+        redesigned = True       # no canary to check; allow recovery as before
+
     if name_selector:
         node = smart_css(page, name_selector, key="name")
         if node is not None:
@@ -411,18 +434,29 @@ def from_css_rules(page, rules: dict | None, smart_css) -> dict:
                 found["name"] = text[:300]
 
     price = None
+    price_node = None
     price_selector = rules.get("price")
     if price_selector:
-        node = smart_css(page, price_selector, key="price")
-        if node is not None:
-            price = parse_price(node.get_all_text())
+        price_node = smart_css(page, price_selector, key="price", adaptive=redesigned)
+        if price_node is not None:
+            price = parse_price(price_node.get_all_text())
 
     sale = None
     sale_selector = rules.get("sale_price")
     if sale_selector:
-        node = smart_css(page, sale_selector, key="sale_price")
-        if node is not None:
-            sale = parse_price(node.get_all_text())
+        # On an unchanged page a missing sale element just means no sale is
+        # on, so it is never guessed. On a redesigned page it may be; a
+        # look-alike that is not actually lower is thrown away just below.
+        sale_node = smart_css(page, sale_selector, key="sale_price", adaptive=redesigned)
+        if sale_node is not None:
+            sale = parse_price(sale_node.get_all_text())
+            # A real discount shows the old and new price side by side, in
+            # one container. A guessed "sale" found anywhere else - another
+            # size's row in a price table, say - is a different price, not a
+            # discount, and would invent a sale that is not happening.
+            if redesigned and price_node is not None \
+                    and _container(sale_node) != _container(price_node):
+                sale = None
 
     # A "sale" figure that is not actually lower is not a sale.
     if price is not None and sale is not None and sale >= price:
@@ -435,9 +469,14 @@ def from_css_rules(page, rules: dict | None, smart_css) -> dict:
     if sale is not None:
         found["explicit_sale_price"] = sale
 
+    # Tell the caller these facts rest on adaptive guesses, so it can rank
+    # them behind anything the shop publishes itself.
+    if name_selector and redesigned and found:
+        found["_recovered"] = True
+
     stock_selector = rules.get("in_stock")
     if stock_selector:
-        node = smart_css(page, stock_selector, key="in_stock")
+        node = smart_css(page, stock_selector, key="in_stock", adaptive=redesigned)
         if node is not None:
             status = stock_from_text(str(node.get_all_text()))
             if status is not None:
@@ -669,6 +708,13 @@ def extract_listing(page, url: str, rules: dict | None = None) -> list[dict]:
     """
     listing_rules = (rules or {}).get("listing") or {}
 
+    # A published schema.org product list beats reading the grid - unless a
+    # site rule deliberately points at the grid instead.
+    if not listing_rules.get("item"):
+        structured = listing_from_jsonld(page, url)
+        if len(structured) >= _MIN_LISTING_ITEMS:
+            return structured
+
     candidates: list[str] = []
     if listing_rules.get("item"):
         candidates.append(listing_rules["item"])
@@ -729,3 +775,94 @@ def extract_listing(page, url: str, rules: dict | None = None) -> list[dict]:
         })
 
     return products
+
+
+# ----------------------------------------------------------------------
+# schema.org product lists on category pages
+# ----------------------------------------------------------------------
+#
+# Many shops describe a category page for search engines as a
+# CollectionPage holding an ItemList - every product on the page with its
+# name, link, price and stock. When it is there it is the most reliable
+# listing source there is: exact, and immune to how the grid is styled.
+
+def _jsonld_blocks(page) -> list:
+    blocks = []
+    try:
+        raw = page.css('script[type="application/ld+json"]::text').getall()
+    except Exception:  # noqa: BLE001
+        return blocks
+    for text in raw:
+        try:
+            blocks.append(json.loads(text))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return blocks
+
+
+def _types(node: dict) -> set[str]:
+    value = node.get("@type")
+    values = value if isinstance(value, list) else [value]
+    return {str(v) for v in values if v}
+
+
+def listing_from_jsonld(page, url: str) -> list[dict]:
+    """Products from a schema.org ItemList, in the listing's usual shape."""
+    from urllib.parse import urljoin
+
+    products: list[dict] = []
+    seen: set[str] = set()
+    for block in _jsonld_blocks(page):
+        for node in _walk_jsonld(block):
+            if "ItemList" not in _types(node):
+                continue
+            for element in node.get("itemListElement") or []:
+                if not isinstance(element, dict):
+                    continue
+                inner = element.get("item")
+                item = inner if isinstance(inner, dict) else element
+                name = item.get("name") or element.get("name")
+                link = item.get("url") or element.get("url") or (inner if isinstance(inner, str) else None)
+
+                offer = item.get("offers")
+                if isinstance(offer, list):
+                    offer = next((o for o in offer if isinstance(o, dict)), None)
+                offer = offer if isinstance(offer, dict) else {}
+
+                if not name and not link:
+                    continue
+                link = urljoin(url, str(link)) if link else None
+                key = link or str(name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                products.append({
+                    "name": " ".join(str(name).split()) if name else "",
+                    "price": _offer_price(offer) if offer else None,
+                    "sale_price": None,
+                    "in_stock": stock_from_schema(offer.get("availability")) if offer else None,
+                    "product_url": link,
+                })
+    return products
+
+
+def jsonld_is_listing(page) -> bool:
+    """
+    True when the structured data describes a LIST of products and no
+    product of the page's own - i.e. this is a category page.
+
+    A product page may also list "related products"; it still has its own
+    product entry at the top level, so it is not mistaken for a listing.
+    """
+    has_own_product = False
+    for block in _jsonld_blocks(page):
+        roots = block if isinstance(block, list) else [block]
+        for root in list(roots):
+            if isinstance(root, dict) and isinstance(root.get("@graph"), list):
+                roots = roots + root["@graph"]
+        for root in roots:
+            if isinstance(root, dict) and _types(root) & {"Product", "ProductGroup"}:
+                has_own_product = True
+    if has_own_product:
+        return False
+    return len(listing_from_jsonld(page, "")) >= 2

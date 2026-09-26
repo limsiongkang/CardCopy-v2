@@ -16,7 +16,8 @@ param(
     [switch]$NoEmail,
     [switch]$AlwaysEmail,
     [int]$Limit,
-    [string]$Url
+    [string]$Url,
+    [switch]$Test
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +58,7 @@ if ($NoEmail)     { $arguments += '--no-email' }
 if ($AlwaysEmail) { $arguments += '--always-email' }
 if ($Limit)       { $arguments += @('--limit', $Limit) }
 if ($Url)         { $arguments += @('--url', $Url) }
+if ($Test)        { $arguments += '--test' }
 
 & $python @arguments
 exit $LASTEXITCODE

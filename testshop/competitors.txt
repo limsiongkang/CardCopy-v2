@@ -1,0 +1,11 @@
+# Pages checked by a test run (.\run.ps1 -Test). Same syntax as the real
+# competitors.txt. The category page covers every product; the direct
+# product lines are there so a product is still checked if a layout makes
+# the category page unreadable.
+
+list:variants:http://127.0.0.1:8765/
+variants:http://127.0.0.1:8765/product/coffee-beans/
+variants:http://127.0.0.1:8765/product/t-shirt/
+http://127.0.0.1:8765/product/mug/
+http://127.0.0.1:8765/product/water-bottle/
+http://127.0.0.1:8765/product/backpack/

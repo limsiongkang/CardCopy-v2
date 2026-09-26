@@ -82,6 +82,7 @@ def save_snapshot(products, run_date: str, log=print) -> None:
             "products": {
                 p.url: {
                     "product": p.name,
+                    "variant": p.variant,
                     "price": p.price,
                     "sale_price": p.sale_price,
                     "in_stock": p.stock_text().lower(),
@@ -141,6 +142,7 @@ def find_alerts(products, snapshot: dict[str, dict], log=print) -> list[dict]:
             continue  # new product, nothing to compare against
 
         label = product.name or previous.get("product") or product.url
+        variant = product.variant or previous.get("variant", "")
 
         # --- price drop ------------------------------------------------
         was_price = previous.get("sale_price")
@@ -148,16 +150,20 @@ def find_alerts(products, snapshot: dict[str, dict], log=print) -> list[dict]:
             was_price = previous.get("price")
         now_price = product.effective_price
 
-        if was_price is not None and now_price is not None and now_price < was_price:
-            # Ignore sub-cent wobble from rounding or currency conversion.
-            if (was_price - now_price) >= 0.01:
-                # Wording and plain numbers match the existing Alerts rows.
+        # Ignore sub-cent wobble from rounding or currency conversion.
+        if (was_price is not None and now_price is not None
+                and abs(now_price - was_price) >= 0.01):
+            rose = now_price > was_price
+            if not rose or config.ALERT_ON_PRICE_RISE:
                 alerts.append({
                     "competitor": product.competitor,
                     "product": label,
-                    "alert": "price drop",
+                    "variant": variant,
+                    "alert": "price rise" if rose else "price drop",
                     "was": f"{was_price:.2f}",
                     "now": f"{now_price:.2f}",
+                    # Signed difference: +9.99 up, -7.89 down.
+                    "change": round(now_price - was_price, 2),
                     "url": product.url,
                 })
 
@@ -169,6 +175,7 @@ def find_alerts(products, snapshot: dict[str, dict], log=print) -> list[dict]:
             alerts.append({
                 "competitor": product.competitor,
                 "product": label,
+                "variant": variant,
                 "alert": "out of stock",
                 "was": "in stock",
                 "now": "out of stock",
@@ -179,6 +186,7 @@ def find_alerts(products, snapshot: dict[str, dict], log=print) -> list[dict]:
             alerts.append({
                 "competitor": product.competitor,
                 "product": label,
+                "variant": variant,
                 "alert": "back in stock",
                 "was": "out of stock",
                 "now": "in stock",
@@ -193,17 +201,29 @@ def find_alerts(products, snapshot: dict[str, dict], log=print) -> list[dict]:
 # ----------------------------------------------------------------------
 
 def print_table(products, log):
-    log()
-    log(f"  {'COMPETITOR':<18}{'PRODUCT':<40}{'PRICE':>12}{'SALE':>12}  STOCK")
-    log(f"  {'-' * 18}{'-' * 40}{'-' * 12}{'-' * 12}  {'-' * 7}")
+    """
+    One line per product. A coffee with 21 grind-and-size options is one
+    line here; every variant is in the sheet.
+    """
+    import scraper
+
+    groups: dict[str, list] = {}
     for p in products:
-        if p.error:
-            log(f"  {p.competitor[:17]:<18}{('FAILED: ' + p.error)[:39]:<40}{'':>12}{'':>12}  -")
+        groups.setdefault(p.page_url or p.url, []).append(p)
+
+    log()
+    log(f"  {'COMPETITOR':<18}PRODUCT")
+    log(f"  {'-' * 18}{'-' * 70}")
+    for rows in groups.values():
+        first = rows[0]
+        if first.error:
+            log(f"  {first.competitor[:17]:<18}FAILED: {first.error[:70]}")
             continue
-        log(
-            f"  {p.competitor[:17]:<18}{(p.name or '?')[:39]:<40}"
-            f"{_money(p.price):>12}{_money(p.sale_price):>12}  {p.stock_text()}"
-        )
+        log(f"  {first.competitor[:17]:<18}{scraper._summary(rows)}")
+    variant_rows = sum(1 for p in products if p.variant)
+    log()
+    log(f"  {len(groups)} product(s), {len(products)} row(s)"
+        + (f" including {variant_rows} variant row(s)" if variant_rows else ""))
     log()
 
 
@@ -222,6 +242,8 @@ def run(args) -> int:
 
         if args.dry_run:
             log("DRY RUN - nothing will be written to Google Sheets and no email sent.")
+        if config.TEST_MODE:
+            log("TEST MODE - reading the local test shop; writing only to the TEST tabs.")
 
         # --- settings ---------------------------------------------------
         problems = config.check(
@@ -242,7 +264,13 @@ def run(args) -> int:
 
         # --- what to check ----------------------------------------------
         if args.url:
-            targets = [(scraper.competitor_name_from_url(args.url), args.url, False)]
+            # Same syntax as a competitors.txt line, so
+            # --url "variants:https://..." works too.
+            target = scraper.parse_target(args.url)
+            if target is None:
+                log(f"That is not a web address: {args.url}")
+                return 2
+            targets = [target]
         else:
             targets = scraper.read_targets()
 
@@ -294,10 +322,20 @@ def run(args) -> int:
 
         ok = [p for p in products if not p.error]
         failed = [p for p in products if p.error]
-        stats = {"checked": len(products), "ok": len(ok), "failed": len(failed)}
+        # Count products, not rows: one coffee in 21 sizes is one product.
+        # Variants of a product share its page_url.
+        product_groups: dict[str, bool] = {}
+        for p in products:
+            key = p.page_url or p.url
+            product_groups[key] = product_groups.get(key, False) or bool(p.error)
+        failed_products = sum(1 for has_error in product_groups.values() if has_error)
+        stats = {"checked": len(product_groups),
+                 "ok": len(product_groups) - failed_products,
+                 "failed": failed_products}
 
         print_table(products, log)
-        log(f"Read {len(ok)} of {len(products)} pages successfully.")
+        log(f"Read {stats['ok']} of {stats['checked']} products successfully "
+            f"({len(ok)} row(s) including variants).")
 
         # --- compare ------------------------------------------------------
         alerts = find_alerts(products, snapshot, log=log)
@@ -307,8 +345,11 @@ def run(args) -> int:
                 log()
                 log(f"{len(alerts)} change(s) since {previous_date}:")
                 for alert in alerts:
-                    log(f"  {alert['alert']}: {alert['competitor']} - {alert['product'][:50]}")
-                    log(f"      {alert['was']}  ->  {alert['now']}")
+                    variant = f" ({alert['variant']})" if alert.get("variant") else ""
+                    log(f"  {alert['alert']}: {alert['competitor']} - {alert['product'][:50]}{variant}")
+                    change = alert.get("change")
+                    log(f"      {alert['was']}  ->  {alert['now']}"
+                        + (f"   ({change:+.2f})" if isinstance(change, (int, float)) else ""))
             else:
                 log(f"No price drops or stock-outs since {previous_date}.")
 
@@ -337,6 +378,12 @@ def run(args) -> int:
 
         sheets.polish_all(workbook, data_tab, alerts_tab, log=log)
         log("  Reapplied the table formatting.")
+
+        try:
+            sheets.write_latest(workbook, products, snapshot, log=log)
+            log(f"  Refreshed the '{config.LATEST_TAB}' tab.")
+        except Exception as exc:  # noqa: BLE001 - history is already saved
+            log(f"  (could not refresh the '{config.LATEST_TAB}' tab: {exc})")
 
         # --- email --------------------------------------------------------
         if args.no_email:
@@ -398,7 +445,52 @@ def main() -> int:
                         help="Check one URL instead of competitors.txt.")
     parser.add_argument("--no-log", action="store_true",
                         help="Do not write a log file.")
-    return run(parser.parse_args())
+    parser.add_argument("--test", action="store_true",
+                        help="Check the local test shop and write to the TEST tabs only.")
+    args = parser.parse_args()
+    if args.test:
+        problem = enter_test_mode(args)
+        if problem:
+            print(problem)
+            return 2
+    return run(args)
+
+
+def enter_test_mode(args) -> str:
+    """
+    Point this run at the local test shop, well away from the real data.
+
+    Returns a message if the run cannot go ahead, else an empty string.
+    """
+    import socket
+
+    config.TEST_MODE = True
+    config.DATA_TAB = "TEST Results"
+    config.ALERTS_TAB = "TEST Alerts"
+    config.LATEST_TAB = "TEST Latest"
+    # Its own comparison file too, or the next real run would compare
+    # against test-shop prices.
+    config.SNAPSHOT_FILE = config.DATA_DIR / "test_last_run.json"
+    config.CLIENT_NAME = f"[TEST] {config.CLIENT_NAME}".strip()
+    # A proxy out on the internet cannot reach a shop running on this computer.
+    config.PROXY_ENABLED = False
+    # It is our own shop; no need to be gentle with it.
+    config.REQUEST_DELAY_SECONDS = 0.5
+    # The test shop's own page list and site rules, kept beside it. The
+    # rules are written for the Classic layout, which is what lets adaptive
+    # mode be tested when the layout is switched.
+    config.COMPETITORS_FILE = config.ROOT / "testshop" / "competitors.txt"
+    config.SELECTORS_FILE = config.ROOT / "testshop" / "selectors.json"
+
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=3):
+            pass
+    except OSError:
+        return ("The test shop is not running.\n"
+                "Start it first, in a separate PowerShell window:\n"
+                "    .\\start_testshop.ps1\n"
+                "then run this again.")
+    return ""
 
 
 if __name__ == "__main__":

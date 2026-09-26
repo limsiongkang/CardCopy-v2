@@ -140,24 +140,69 @@ HTTP_TIMEOUT_SECONDS = _number("HTTP_TIMEOUT_SECONDS", 20)
 # never get there, so the browser sits out the whole timeout on every page.
 # Off by default; turn on only for a site whose prices arrive late.
 NETWORK_IDLE = _flag("NETWORK_IDLE", False)
+# Try IPv4 before IPv6 for Google Sheets and email. On a network where IPv6
+# is on but broken, each connection otherwise waits a minute or more for
+# IPv6 to time out, and Sheets often gives up first. See netfix.py.
+PREFER_IPV4 = _flag("PREFER_IPV4", True)
 
 # --- what counts as an alert -------------------------------------------
 # Price drops and stock-outs always alert - that was the original brief.
 # Back-in-stock is useful but noisier, so it is opt-in.
 ALERT_ON_BACK_IN_STOCK = _flag("ALERT_ON_BACK_IN_STOCK", False)
+# Price rises are recorded as alerts too (and emailed), so every price
+# movement shows on the Alerts tab. Set false for drops only.
+ALERT_ON_PRICE_RISE = _flag("ALERT_ON_PRICE_RISE", True)
 
 SHEET_TITLE = f"{CLIENT_NAME} - Competitor Intel" if CLIENT_NAME else ""
 # "Results" is the tab the existing history lives in. Writing there means each
 # run can compare against the previous one from day one.
 DATA_TAB = "Results"
 ALERTS_TAB = "Alerts"
+# Today's picture only, rewritten every run and grouped by product - the tab
+# to open when you want to check prices. Results keeps the full history.
+LATEST_TAB = "Latest"
 
+# --- test mode (run.ps1 -Test) -------------------------------------------
+# Reads the local test shop (start_testshop.ps1) and writes to separate
+# TEST tabs, so testing the alerts never touches the real history.
+TEST_MODE = False
+TEST_SHOP_URL = "list:variants:http://127.0.0.1:8765/"
+# Show a product's name once, in one tall cell beside all of its variant
+# rows, instead of repeating it on every row. Easier to read; the cost is
+# that Google Sheets cannot sort a range containing merged cells, and a
+# filter on the product column only matches each product's first row.
+MERGE_PRODUCT_NAMES = _flag("MERGE_PRODUCT_NAMES", True)
+
+# Each row is one variant (a size, colour, grind...). A product without
+# options is a single row with the variant cell left empty.
 DATA_HEADERS = [
+    "date", "competitor", "product", "variant", "price", "sale price", "in stock", "URL",
+]
+# "change" is the signed price difference, e.g. +9.99 or -7.89.
+ALERT_HEADERS = [
+    "date", "competitor", "product", "variant", "alert", "was", "now", "change", "URL",
+]
+LATEST_HEADERS = [
+    "competitor", "product", "variant", "price", "sale price", "in stock",
+    "change since last run", "URL",
+]
+
+# The layouts before variants existed. A tab still in this shape gets a
+# variant column inserted - shifting its history across properly - instead of
+# having its header overwritten, which would misalign every existing row.
+LEGACY_DATA_HEADERS = [
     "date", "competitor", "product", "price", "sale price", "in stock", "URL",
 ]
-ALERT_HEADERS = [
+LEGACY_ALERT_HEADERS = [
     "date", "competitor", "product", "alert", "was", "now", "URL",
 ]
+
+# --- category pages ------------------------------------------------------
+# A "list:variants:" line opens every product on the category page to read its
+# variants - one page visit per product. This caps how many, so one huge
+# category cannot turn a run into hours. (Whether to open them at all is
+# decided per line in competitors.txt by the "variants:" prefix.)
+LISTING_MAX_PRODUCTS = int(_number("LISTING_MAX_PRODUCTS", 100))
 
 
 def proxy() -> dict | None:

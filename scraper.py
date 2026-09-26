@@ -27,6 +27,7 @@ from scrapling.fetchers import Fetcher, StealthyFetcher, StealthySession
 
 import config
 import extractors
+import variants
 
 # Adaptive mode, on for every fetch this process makes - on both the fast
 # path and the browser path. Each fetch also passes it explicitly through
@@ -49,6 +50,11 @@ class Product:
     in_stock: bool | None = None
     error: str = ""
     sources: list[str] = field(default_factory=list)
+    # Which size / colour / grind this row is. Empty for a product without options.
+    variant: str = ""
+    # The product page this row came from. Variants of one product share it,
+    # which is how they are grouped together in the sheet.
+    page_url: str = ""
 
     @property
     def ok(self) -> bool:
@@ -106,25 +112,77 @@ def competitor_name_from_url(url: str) -> str:
     return host or url
 
 
-def read_targets(path=None) -> list[tuple[str, str, bool]]:
+# Words that can prefix a URL in competitors.txt, in any order:
+#   list:      read the page as a category page, even if it looks like one product
+#   variants:  one row per variant (size, colour...), not one per product
+_PREFIXES = {"list:": "listing", "variants:": "variants", "variant:": "variants"}
+
+
+def _strip_prefixes(text: str, flags: set[str]) -> str:
+    changed = True
+    while changed:
+        changed = False
+        lowered = text.lower()
+        for prefix, flag in _PREFIXES.items():
+            if lowered.startswith(prefix):
+                flags.add(flag)
+                text = text[len(prefix):].strip()
+                changed = True
+                break
+    return text
+
+
+def parse_target(line: str) -> tuple[str, str, bool, bool] | None:
     """
-    Read competitors.txt into (competitor_name, url, force_listing) triples.
+    One competitors.txt line -> (competitor_name, url, force_listing, variants).
 
-    A line may be a single product page or a whole category page; which one
-    it is gets worked out at scrape time. Prefixing a line with "list:"
-    forces listing mode, for a category page that also publishes
-    single-product data and would otherwise be read as one product.
+    Returns None for blank lines, comments and anything that is not a web
+    address. All of these are accepted:
 
-    Both of these are still accepted:
         https://shop.example/product/thing
-        My Shop | https://shop.example/product/thing
+        variants:https://shop.example/product/thing
+        list:https://shop.example/collections/all
+        list:variants:https://shop.example/collections/all   (either order)
+        My Shop | variants:https://shop.example/product/thing
     """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+
+    if "|" in line:
+        name, _, url = line.partition("|")
+        name, url = name.strip(), url.strip()
+    else:
+        name, url = "", line
+
+    # A prefix may sit on either side of the "|".
+    flags: set[str] = set()
+    url = _strip_prefixes(url, flags)
+    name = _strip_prefixes(name, flags)
+
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    return (name or competitor_name_from_url(url), url,
+            "listing" in flags, "variants" in flags)
+
+
+def read_targets(path=None) -> list[tuple[str, str, bool, bool]]:
+    """Read competitors.txt into (name, url, force_listing, variants) tuples."""
     path = path or config.COMPETITORS_FILE
-    targets: list[tuple[str, str, bool]] = []
+    targets: list[tuple[str, str, bool, bool]] = []
     seen: set[str] = set()
 
     if not path.exists():
         return targets
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        target = parse_target(raw_line)
+        if target is None or target[1] in seen:
+            continue
+        seen.add(target[1])
+        targets.append(target)
+
+    return targets
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -171,13 +229,19 @@ def make_smart_css(log=print):
     mode has something to fall back on next time.
     """
 
-    def smart_css(page, selector: str, key: str = ""):
+    def smart_css(page, selector: str, key: str = "", adaptive: bool = True):
         try:
             found = page.css(selector, auto_save=True)
             if found:
                 return found[0]
         except Exception:
             pass
+
+        # The caller decides whether "found nothing" can mean "moved". For an
+        # element that is often legitimately absent - a sale price when there
+        # is no sale - it cannot, and guessing would invent a look-alike.
+        if not adaptive:
+            return None
 
         try:
             recovered = page.css(selector, adaptive=True)
@@ -281,6 +345,20 @@ def polite_wait(url: str) -> None:
     _last_hit[host] = time.monotonic()
 
 
+def _http_proxy_options() -> dict:
+    """Proxy settings in the form the plain HTTP client takes."""
+    proxy_settings = config.proxy()
+    if not proxy_settings:
+        return {}
+    # Server and credentials go separately so the password never sits
+    # inside a URL.
+    options = {"proxy": proxy_settings["server"]}
+    if proxy_settings.get("username"):
+        options["proxy_auth"] = (proxy_settings["username"],
+                                 proxy_settings.get("password", ""))
+    return options
+
+
 def _fast_fetch(url: str):
     options = dict(
         impersonate="chrome",
@@ -289,14 +367,7 @@ def _fast_fetch(url: str):
         retries=1,
         selector_config=_selector_config(url),
     )
-    proxy_settings = config.proxy()
-    if proxy_settings:
-        # Server and credentials go separately so the password never sits
-        # inside a URL.
-        options["proxy"] = proxy_settings["server"]
-        if proxy_settings.get("username"):
-            options["proxy_auth"] = (proxy_settings["username"],
-                                     proxy_settings.get("password", ""))
+    options.update(_http_proxy_options())
     return Fetcher.get(url, **options)
 
 
@@ -422,16 +493,33 @@ def scrape(url: str, competitor: str, log=print, selector_rules: dict | None = N
     facts: dict = {}
     site_rules = rules_for(url, selector_rules or {})
 
-    # Hand-written rules run FIRST. One only exists because somebody wrote it
-    # for this shop, which usually means the automatic strategies read it
-    # wrongly - so the rule has to be able to win, not just fill in gaps.
-    for label, strategy in (
-        ("site rules", lambda: extractors.from_css_rules(page, site_rules, smart_css)),
+    # Hand-written rules normally run FIRST. One only exists because somebody
+    # wrote it for this shop, which usually means the automatic strategies
+    # read it wrongly - so the rule has to be able to win, not just fill gaps.
+    #
+    # Except after a redesign. A rule that only matched through an adaptive
+    # guess is no longer written for this layout, and a guess must not
+    # overrule the price the shop itself publishes - so it drops behind the
+    # structured data and only fills what that leaves empty.
+    try:
+        rule_facts = extractors.from_css_rules(page, site_rules, smart_css) or {}
+    except Exception as exc:  # noqa: BLE001
+        log(f"      site rules strategy failed: {_short(exc)}")
+        rule_facts = {}
+    rules_guessed = bool(rule_facts.pop("_recovered", False))
+
+    strategies = [
         ("structured data", lambda: extractors.from_jsonld(page)),
         ("microdata", lambda: extractors.from_microdata(page)),
         ("meta tags", lambda: extractors.from_meta(page)),
-        ("page text", lambda: extractors.from_visible_text(page, smart_css)),
-    ):
+    ]
+    if rules_guessed:
+        strategies.append(("site rules (adaptive)", lambda: rule_facts))
+    else:
+        strategies.insert(0, ("site rules", lambda: rule_facts))
+    strategies.append(("page text", lambda: extractors.from_visible_text(page, smart_css)))
+
+    for label, strategy in strategies:
         try:
             result = strategy()
         except Exception as exc:  # noqa: BLE001
@@ -451,6 +539,11 @@ def scrape(url: str, competitor: str, log=print, selector_rules: dict | None = N
 
     current_price = facts.get("current_price")
     explicit_sale = facts.get("explicit_sale_price")
+    # A guessed sale price only means something beside the guessed price it
+    # was read with. If the published data supplied the price instead, the
+    # two are not a pair - let the crossed-out-price check decide.
+    if rules_guessed and current_price != rule_facts.get("current_price"):
+        explicit_sale = None
 
     if explicit_sale is not None:
         # A site rule named both prices outright, so no guessing is needed.
@@ -491,6 +584,15 @@ def _looks_like_single_product(page) -> bool:
     them for itself - which makes their presence a reliable way to tell one
     kind of page from the other, without guessing from layout.
     """
+    # A category page can carry structured data too - a list of the products
+    # on it. Reading that as "one product" would report the first item in
+    # the list and silently miss the rest.
+    try:
+        if extractors.jsonld_is_listing(page):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+
     for strategy in (extractors.from_jsonld, extractors.from_microdata):
         try:
             facts = strategy(page) or {}
@@ -533,6 +635,7 @@ def scrape_listing(page, url: str, competitor: str, selector_rules: dict | None 
         product.sale_price = facts.get("sale_price")
         product.in_stock = facts.get("in_stock")
         product.sources = ["listing page"]
+        product.page_url = item_url
         if product.price is None and not product.name:
             continue
         products.append(product)
@@ -540,12 +643,178 @@ def scrape_listing(page, url: str, competitor: str, selector_rules: dict | None 
     return products
 
 
+def _fetch_json(url: str):
+    """
+    Fetch a small JSON file from a shop - used for Shopify's per-product
+    variant data. Returns parsed JSON, or None if it could not be had.
+
+    No politeness pause here: this is part of viewing one product page, the
+    same way a real browser loads a dozen files for every page it shows.
+    """
+    try:
+        options = dict(impersonate="chrome", stealthy_headers=True,
+                       timeout=config.HTTP_TIMEOUT_SECONDS, retries=1)
+        options.update(_http_proxy_options())
+        response = Fetcher.get(url, **options)
+    except Exception:  # noqa: BLE001
+        return None
+    status = getattr(response, "status", 0) or 0
+    if not 0 < status < 400:
+        return None
+    body = getattr(response, "body", b"")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="ignore")
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def scrape_product(url: str, competitor: str, log=print, selector_rules: dict | None = None,
+                   page=None, want_variants: bool = False) -> list[Product]:
+    """
+    Read one product page into rows: one per variant, or a single row for a
+    product without options.
+
+    The headline read (scrape) still runs first - it supplies the product
+    name and currency, and it is the whole answer for a simple product. The
+    variant data, when present, then replaces the headline price and stock,
+    because for a product with options the headline is often wrong: a shop
+    can mark the product "out of stock" while every size is available.
+    """
+    if page is None:
+        try:
+            page = fetch_page(url, log=log, selector_rules=selector_rules)
+        except Exception as exc:  # noqa: BLE001
+            return [Product(url=url, competitor=competitor, error=_short(exc), page_url=url)]
+
+    base = scrape(url, competitor, log=log, selector_rules=selector_rules, page=page)
+    base.page_url = url
+    if base.error or not want_variants:
+        return [base]
+
+    try:
+        found = variants.read_variants(page, url, fetch_json=_fetch_json)
+    except Exception as exc:  # noqa: BLE001
+        log(f"      could not read the variants - {_short(exc)}")
+        found = []
+
+    if not found:
+        return [base]
+
+    rows: list[Product] = []
+    for variant in found:
+        row = Product(url=variant["url"], competitor=competitor, page_url=url)
+        row.name = variant.get("product") or base.name
+        row.variant = variant.get("label") or ""
+        row.price = variant.get("price")
+        row.sale_price = variant.get("sale_price")
+        row.in_stock = variant.get("in_stock")
+        row.currency = variant.get("currency") or base.currency
+        row.sources = [variant.get("source") or "variant data"]
+        rows.append(row)
+    return rows
+
+
+def _readable(rows: list[Product]) -> list[Product]:
+    """Rows worth keeping: an error-only result counts as nothing found."""
+    return [row for row in rows if not row.error]
+
+
+def _follow_listing(tiles: list[Product], listing_url: str, competitor: str,
+                    selector_rules: dict | None, log=print) -> list[Product]:
+    """
+    Open each product found on a category page and read it in full.
+
+    A grid tile shows one price and, at best, one stock flag for the product
+    as a whole - it cannot show which sizes or colours are available, or
+    what each costs. The tile is kept as a fallback if its page fails.
+    """
+    limit = config.LISTING_MAX_PRODUCTS
+    if len(tiles) > limit:
+        log(f"      reading the first {limit} of {len(tiles)} products "
+            f"(raise LISTING_MAX_PRODUCTS in .env for more)")
+        tiles = tiles[:limit]
+
+    rows: list[Product] = []
+    total = len(tiles)
+    for number, tile in enumerate(tiles, start=1):
+        if not tile.url or tile.url == listing_url:
+            rows.append(tile)
+            continue
+
+        polite_wait(tile.url)
+        got = _readable(scrape_product(tile.url, competitor, log=_quiet,
+                                       selector_rules=selector_rules, want_variants=True))
+        if got:
+            log(f"      [{number}/{total}] {_summary(got)}")
+            rows.extend(got)
+        else:
+            tile.sources = ["category page only - product page could not be read"]
+            log(f"      [{number}/{total}] {tile.name[:50]} - product page failed, "
+                f"kept the category page's figures")
+            rows.append(tile)
+    return rows
+
+
+def _summary(rows: list[Product]) -> str:
+    """One line describing one product, however many variants it has."""
+    first = rows[0]
+    name = (first.name or "(no name found)")[:50]
+    if len(rows) == 1 and not first.variant:
+        price_text = _money(first.price, first.currency)
+        if first.sale_price is not None:
+            price_text += f" (on sale at {_money(first.sale_price, first.currency)})"
+        return f"{name} - {price_text} - in stock: {first.stock_text()}"
+
+    prices = [r.effective_price for r in rows if r.effective_price is not None]
+    if prices:
+        low, high = min(prices), max(prices)
+        span = _money(low, first.currency) if low == high else \
+            f"{_money(low, first.currency)} to {_money(high, first.currency)}"
+    else:
+        span = "no prices found"
+    in_stock = sum(1 for r in rows if r.in_stock is True)
+    unknown = sum(1 for r in rows if r.in_stock is None)
+    stock_text = f"{in_stock}/{len(rows)} in stock"
+    if unknown:
+        stock_text += f", {unknown} unknown"
+    return f"{name} - {len(rows)} variants, {span}, {stock_text}"
+
+
+def _log_rows(rows: list[Product], log) -> None:
+    groups: dict[str, list[Product]] = {}
+    for row in rows:
+        groups.setdefault(row.page_url or row.url, []).append(row)
+    for group in groups.values():
+        log(f"      {_summary(group)}")
+    sources = sorted({s for r in rows for s in r.sources})
+    if sources and len(groups) == 1:
+        log(f"      read from: {', '.join(sources)}")
+
+
+def _dedupe(rows: list[Product]) -> list[Product]:
+    """
+    Keep the first row for each URL. A product listed on its own and also
+    found on a category page would otherwise be written - and compared -
+    twice.
+    """
+    seen: set[str] = set()
+    kept: list[Product] = []
+    for row in rows:
+        if row.url in seen:
+            continue
+        seen.add(row.url)
+        kept.append(row)
+    return kept
+
+
 def scrape_all(targets: list[tuple[str, str, bool]], log=print) -> list[Product]:
     """
-    Scrape every target, pausing politely between them.
+    Scrape every target, pausing politely between pages on the same site.
 
-    A target may turn out to be a single product page or a category page
-    holding many. The page is fetched once either way.
+    A target may be a single product page or a category page. Either way the
+    result is one row per variant of each product found.
     """
     results: list[Product] = []
     total = len(targets)
@@ -558,20 +827,23 @@ def scrape_all(targets: list[tuple[str, str, bool]], log=print) -> list[Product]
         # Tolerate the older two-item form so nothing that calls this breaks.
         competitor, url = target[0], target[1]
         force_listing = target[2] if len(target) > 2 else False
+        want_variants = target[3] if len(target) > 3 else False
 
+        modes = [m for m, on in (("listing", force_listing), ("variants", want_variants)) if on]
         log(f"  [{index}/{total}] {competitor}: {url}"
-            + ("  (listing)" if force_listing else ""))
+            + (f"  ({', '.join(modes)})" if modes else ""))
 
         polite_wait(url)
         try:
             page = fetch_page(url, log=log, selector_rules=selector_rules)
         except Exception as exc:  # noqa: BLE001
-            failed = Product(url=url, competitor=competitor, error=_short(exc))
+            failed = Product(url=url, competitor=competitor, error=_short(exc), page_url=url)
             log(f"      could not read this page - {failed.error}")
             results.append(failed)
             continue
 
-        found: list[Product] = []
+        rows: list[Product] = []
+        followed = False
 
         # Deciding single-product vs listing, in order of how much the
         # evidence is worth:
@@ -586,46 +858,45 @@ def scrape_all(targets: list[tuple[str, str, bool]], log=print) -> list[Product]
         # but meaningless row ("Shop - 69.00"). Letting it run before listing
         # detection would hide a perfectly readable grid behind one wrong row.
         if not force_listing and _looks_like_single_product(page):
-            single = scrape(url, competitor, log=log,
-                            selector_rules=selector_rules, page=page)
-            if not single.error:
-                found = [single]
+            rows = _readable(scrape_product(url, competitor, log=log,
+                                            selector_rules=selector_rules, page=page,
+                                            want_variants=want_variants))
 
-        if not found:
-            found = scrape_listing(page, url, competitor, selector_rules, log=log)
-            if found:
-                log(f"      listing page - found {len(found)} product(s)")
+        if not rows:
+            tiles = scrape_listing(page, url, competitor, selector_rules, log=log)
+            if tiles:
+                # A grid cannot show sizes or per-variant stock, so variants
+                # mode opens each product. Otherwise the grid is the answer.
+                if want_variants:
+                    log(f"      category page - {len(tiles)} product(s), opening each for variants")
+                    rows = _follow_listing(tiles, url, competitor, selector_rules, log=log)
+                    followed = True
+                else:
+                    log(f"      category page - {len(tiles)} product(s)")
+                    rows = tiles
 
         # Neither definite: fall back to the full single-product read, weak
         # strategies included. Better a rough row than nothing.
-        if not found and not force_listing:
-            single = scrape(url, competitor, log=log,
-                            selector_rules=selector_rules, page=page)
-            if not single.error:
-                found = [single]
+        if not rows and not force_listing:
+            rows = _readable(scrape_product(url, competitor, log=log,
+                                            selector_rules=selector_rules, page=page,
+                                            want_variants=want_variants))
 
-        if not found:
-            failed = Product(url=url, competitor=competitor,
+        if not rows:
+            failed = Product(url=url, competitor=competitor, page_url=url,
                              error="could not find a product name or price on this page")
             log(f"      could not read this page - {failed.error}")
             results.append(failed)
-        elif len(found) == 1:
-            product = found[0]
-            price_text = _money(product.price, product.currency)
-            if product.sale_price is not None:
-                price_text += f" (on sale at {_money(product.sale_price, product.currency)})"
-            log(f"      {product.name[:60] or '(no name found)'} - {price_text} - in stock: {product.stock_text()}")
-            if product.sources:
-                log(f"      read from: {', '.join(product.sources)}")
-            results.append(product)
-        else:
-            priced = sum(1 for p in found if p.price is not None)
-            in_stock = sum(1 for p in found if p.in_stock is True)
-            log(f"      {len(found)} product(s): {priced} priced, {in_stock} in stock")
-            results.extend(found)
+            continue
+
+        # Products opened from a category page were logged one by one as
+        # they were read; everything else gets its summary here.
+        if not followed:
+            _log_rows(rows, log)
+        results.extend(rows)
 
     close_browser()
-    return results
+    return _dedupe(results)
 
 
 def _money(value: float | None, currency: str = "") -> str:
